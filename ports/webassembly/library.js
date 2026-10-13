@@ -30,46 +30,20 @@ mergeInto(LibraryManager.library, {
 
     mp_js_ticks_ms: () => Date.now() - MP_JS_EPOCH,
 
-    mp_js_hook: () => {
-        if (ENVIRONMENT_IS_NODE) {
-            const mp_interrupt_char = Module.ccall(
-                "mp_hal_get_interrupt_char",
-                "number",
-                [],
-                [],
-            );
-            const fs = require("fs");
+    // Legacy v1.23 browser/Worker interrupt request flag.  For direct JS
+    // callers, the public interrupt() method still schedules KeyboardInterrupt.
+    mp_js_hook__postset: "var MP_INTERRUPT = false;",
 
-            const buf = Buffer.alloc(1);
-            try {
-                const n = fs.readSync(process.stdin.fd, buf, 0, 1);
-                if (n > 0) {
-                    if (buf[0] === mp_interrupt_char) {
-                        Module.ccall(
-                            "mp_sched_keyboard_interrupt",
-                            "null",
-                            ["null"],
-                            ["null"],
-                        );
-                    } else {
-                        process.stdout.write(String.fromCharCode(buf[0]));
-                    }
-                }
-            } catch (e) {
-                if (e.code === "EAGAIN") {
-                } else {
-                    throw e;
-                }
-            }
+    mp_js_hook: () => {
+        if (MP_INTERRUPT) {
+            MP_INTERRUPT = false;
+            Module.ccall("mp_sched_keyboard_interrupt", "null", [], []);
         }
     },
 
     mp_js_time_ms: () => Date.now(),
 
-    // Node prior to v19 did not expose "crypto" as a global, so make sure it exists.
-    mp_js_random_u32__postset:
-        "if (globalThis.crypto === undefined) { globalThis.crypto = require('crypto'); }",
-
+    // crypto.getRandomValues is available in secure browser contexts, including Workers.
     mp_js_random_u32: () =>
         globalThis.crypto.getRandomValues(new Uint32Array(1))[0],
 });

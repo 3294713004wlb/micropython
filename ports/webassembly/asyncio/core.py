@@ -252,6 +252,12 @@ def get_event_loop():
     return Loop
 
 
+def get_running_loop():
+    # Mirrors the v1.23 compatibility port's exposed API.  This port has a
+    # single JavaScript-scheduled loop (unlike CPython's policy-driven loops).
+    return Loop
+
+
 def current_task():
     assert cur_task is not None
     return cur_task

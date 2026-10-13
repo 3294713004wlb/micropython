@@ -26,20 +26,28 @@
 
 // Options:
 // - pystack: size in words of the MicroPython Python stack.
-// - heapsize: size in bytes of the MicroPython GC heap.
+// - heapsize: initial size (bytes) of the MicroPython GC heap; it may expand.
+//   The stack/pystack are not part of the GC heap.
 // - url: location to load `micropython.mjs`.
-// - stdin: function to return input characters.
+// - stdin: optional callback for standard input (not a Node CLI).
 // - stdout: function that takes one argument, and is passed lines of stdout
 //   output as they are produced.  By default this is handled by Emscripten
-//   and in a browser goes to console, in node goes to process.stdout.write.
+//   and by default is forwarded to the browser/Worker console.
 // - stderr: same behaviour as stdout but for error output.
 // - linebuffer: whether to buffer line-by-line to stdout/stderr.
 export async function loadMicroPython(options) {
     const { pystack, heapsize, url, stdin, stdout, stderr, linebuffer } =
         Object.assign(
-            { pystack: 2 * 1024, heapsize: 1024 * 1024, linebuffer: true },
+            { pystack: 2 * 1024, heapsize: 16 * 1024 * 1024, linebuffer: true },
             options,
         );
+    // mp_js_init takes 32-bit signed integers; reject accidental wraparound.
+    if (!Number.isSafeInteger(heapsize) || heapsize < 64 * 1024 || heapsize > 1024 * 1024 * 1024) {
+        throw new RangeError("heapsize must be an integer between 64 KiB and 1 GiB");
+    }
+    if (!Number.isSafeInteger(pystack) || pystack < 256 || pystack > 1024 * 1024) {
+        throw new RangeError("pystack must be an integer between 256 and 1048576 words");
+    }
     let Module = {};
     Module.locateFile = (path, scriptDirectory) =>
         url || scriptDirectory + path;
@@ -88,27 +96,48 @@ export async function loadMicroPython(options) {
     Module = await _createMicroPythonModule(Module);
     globalThis.Module = Module;
     proxy_js_init();
-    const pyimport = (name) => {
-        const value = Module._malloc(3 * 4);
-        Module.ccall(
-            "mp_js_do_import",
-            "null",
-            ["string", "pointer"],
-            [name, value],
-        );
-        return proxy_convert_mp_to_js_obj_jsside_with_free(value);
+    const mallocOrThrow = (size) => {
+        const ptr = Module._malloc(size);
+        if (!ptr) {
+            throw new RangeError(`WASM malloc failed for ${size} bytes`);
+        }
+        return ptr;
     };
-    Module.ccall(
-        "mp_js_init",
-        "null",
-        ["number", "number"],
-        [pystack, heapsize],
-    );
+    const pyimport = (name) => {
+        const value = mallocOrThrow(3 * 4);
+        try {
+            Module.ccall(
+                "mp_js_do_import",
+                "null",
+                ["string", "pointer"],
+                [name, value],
+            );
+            return proxy_convert_mp_to_js_obj_jsside(value);
+        } finally {
+            Module._free(value);
+        }
+    };
+    if (Module.ccall("mp_js_init", "number", ["number", "number"], [pystack, heapsize]) !== 0) {
+        throw new RangeError(`Could not initialise MicroPython (pystack=${pystack}, heapsize=${heapsize})`);
+    }
     Module.ccall("proxy_c_init", "null", [], []);
+    // Serialize incoming terminal bytes. Asyncify must never be re-entered
+    // while an earlier character is still executing Python code.
+    let replPending = Promise.resolve();
     return {
         _module: Module,
         PyProxy: PyProxy,
         FS: Module.FS,
+        // Fetch the CURRENT linear memory view.  Growth can invalidate any
+        // previously cached Uint8Array pointing into WASM memory.
+        getWasmMemoryBytes() {
+            return Module.HEAPU8.byteLength;
+        },
+        // Request an interrupt using the same direct API as the newer port.
+        // A VM hook can observe the request while Python is executing.
+        requestKeyboardInterrupt() {
+            Module.ccall("mp_sched_keyboard_interrupt", "null", [], []);
+        },
         globals: {
             __dict__: pyimport("__main__").__dict__,
             get(key) {
@@ -122,176 +151,92 @@ export async function loadMicroPython(options) {
             },
         },
         registerJsModule(name, module) {
-            const value = Module._malloc(3 * 4);
-            proxy_convert_js_to_mp_obj_jsside(module, value);
-            Module.ccall(
-                "mp_js_register_js_module",
-                "null",
-                ["string", "pointer"],
-                [name, value],
-            );
-            Module._free(value);
+            const value = mallocOrThrow(3 * 4);
+            try {
+                proxy_convert_js_to_mp_obj_jsside(module, value);
+                Module.ccall(
+                    "mp_js_register_js_module",
+                    "null",
+                    ["string", "pointer"],
+                    [name, value],
+                );
+            } finally {
+                Module._free(value);
+            }
         },
         pyimport: pyimport,
-        runPython(code) {
+        // With Asyncify, even ordinary execution can suspend during JS calls.
+        // Always await it; pointers remain valid until the WASM call completes.
+        async runPython(code) {
             const len = Module.lengthBytesUTF8(code);
-            const buf = Module._malloc(len + 1);
-            Module.stringToUTF8(code, buf, len + 1);
-            const value = Module._malloc(3 * 4);
-            Module.ccall(
-                "mp_js_do_exec",
-                "number",
-                ["pointer", "number", "pointer"],
-                [buf, len, value],
-            );
-            Module._free(buf);
-            return proxy_convert_mp_to_js_obj_jsside_with_free(value);
-        },
-        runPythonAsync(code) {
-            const len = Module.lengthBytesUTF8(code);
-            const buf = Module._malloc(len + 1);
-            Module.stringToUTF8(code, buf, len + 1);
-            const value = Module._malloc(3 * 4);
-            Module.ccall(
-                "mp_js_do_exec_async",
-                "number",
-                ["pointer", "number", "pointer"],
-                [buf, len, value],
-            );
-            Module._free(buf);
-            const ret = proxy_convert_mp_to_js_obj_jsside_with_free(value);
-            if (ret instanceof PyProxyThenable) {
-                return Promise.resolve(ret);
+            let buf = 0;
+            let value = 0;
+            try {
+                buf = mallocOrThrow(len + 1);
+                Module.stringToUTF8(code, buf, len + 1);
+                value = mallocOrThrow(3 * 4);
+                await Module.ccall(
+                    "mp_js_do_exec",
+                    "null",
+                    ["pointer", "number", "pointer"],
+                    [buf, len, value],
+                    { async: true },
+                );
+                return proxy_convert_mp_to_js_obj_jsside(value);
+            } finally {
+                if (value) Module._free(value);
+                if (buf) Module._free(buf);
             }
-            return ret;
         },
+        async runPythonAsync(code) {
+            const len = Module.lengthBytesUTF8(code);
+            let buf = 0;
+            let value = 0;
+            let ret;
+            try {
+                buf = mallocOrThrow(len + 1);
+                Module.stringToUTF8(code, buf, len + 1);
+                value = mallocOrThrow(3 * 4);
+                await Module.ccall(
+                    "mp_js_do_exec_async",
+                    "null",
+                    ["pointer", "number", "pointer"],
+                    [buf, len, value],
+                    { async: true },
+                );
+                ret = proxy_convert_mp_to_js_obj_jsside(value);
+            } finally {
+                if (value) Module._free(value);
+                if (buf) Module._free(buf);
+            }
+            // Promote a top-level Python awaitable into a JS promise.
+            return ret instanceof PyProxyThenable ? Promise.resolve(ret) : ret;
+        },
+        // Browser terminal REPL. Initialise before processing keypresses.
         replInit() {
-            Module.ccall("mp_js_repl_init", "null", ["null"]);
+            Module.ccall("mp_js_repl_init", "null", [], []);
         },
+        // Synchronous compatibility API: do NOT use for code that may
+        // suspend, e.g. time.sleep() or JavaScript-bridged async operations.
         replProcessChar(chr) {
             return Module.ccall(
-                "mp_js_repl_process_char",
-                "number",
-                ["number"],
-                [chr],
+                "mp_js_repl_process_char", "number", ["number"], [chr],
             );
         },
-        // Needed if the GC/asyncify is enabled.
-        async replProcessCharWithAsyncify(chr) {
-            return Module.ccall(
-                "mp_js_repl_process_char",
-                "number",
-                ["number"],
-                [chr],
-                { async: true },
-            );
+        // Preferred browser API; returns a Promise. Character handling is
+        // sequenced so concurrent key events cannot re-enter Asyncify.
+        replProcessCharWithAsyncify(chr) {
+            const pending = replPending.then(() => Module.ccall(
+                "mp_js_repl_process_char_async",
+                "number", ["number"], [chr], { async: true },
+            ));
+            replPending = pending.catch(() => {});
+            return pending;
+        },
+        interrupt() {
+            Module.ccall("mp_sched_keyboard_interrupt", "null", [], []);
         },
     };
 }
 
 globalThis.loadMicroPython = loadMicroPython;
-
-async function runCLI() {
-    const fs = await import("fs");
-    let heap_size = 128 * 1024;
-    let contents = "";
-    let repl = true;
-
-    for (let i = 2; i < process.argv.length; i++) {
-        if (process.argv[i] === "-X" && i < process.argv.length - 1) {
-            if (process.argv[i + 1].includes("heapsize=")) {
-                heap_size = parseInt(process.argv[i + 1].split("heapsize=")[1]);
-                const suffix = process.argv[i + 1].substr(-1).toLowerCase();
-                if (suffix === "k") {
-                    heap_size *= 1024;
-                } else if (suffix === "m") {
-                    heap_size *= 1024 * 1024;
-                }
-                ++i;
-            }
-        } else {
-            contents += fs.readFileSync(process.argv[i], "utf8");
-            repl = false;
-        }
-    }
-
-    if (process.stdin.isTTY === false) {
-        contents = fs.readFileSync(0, "utf8");
-        repl = false;
-    }
-
-    const mp = await loadMicroPython({
-        heapsize: heap_size,
-        stdout: (data) => process.stdout.write(data),
-        linebuffer: false,
-    });
-
-    if (repl) {
-        mp.replInit();
-        process.stdin.setRawMode(true);
-        process.stdin.on("data", (data) => {
-            for (let i = 0; i < data.length; i++) {
-                mp.replProcessCharWithAsyncify(data[i]).then((result) => {
-                    if (result) {
-                        process.exit();
-                    }
-                });
-            }
-        });
-    } else {
-        // If the script to run ends with a running of the asyncio main loop, then inject
-        // a simple `asyncio.run` hook that starts the main task.  This is primarily to
-        // support running the standard asyncio tests.
-        if (contents.endsWith("asyncio.run(main())\n")) {
-            const asyncio = mp.pyimport("asyncio");
-            asyncio.run = async (task) => {
-                await asyncio.create_task(task);
-            };
-        }
-
-        try {
-            mp.runPython(contents);
-        } catch (error) {
-            if (error.name === "PythonError") {
-                if (error.type === "SystemExit") {
-                    // SystemExit, this is a valid exception to successfully end a script.
-                } else {
-                    // An unhandled Python exception, print in out.
-                    console.error(error.message);
-                }
-            } else {
-                // A non-Python exception.  Re-raise it.
-                throw error;
-            }
-        }
-    }
-}
-
-// Check if Node is running (equivalent to ENVIRONMENT_IS_NODE).
-if (
-    typeof process === "object" &&
-    typeof process.versions === "object" &&
-    typeof process.versions.node === "string"
-) {
-    // Check if this module is run from the command line via `node micropython.mjs`.
-    //
-    // See https://stackoverflow.com/questions/6398196/detect-if-called-through-require-or-directly-by-command-line/66309132#66309132
-    //
-    // Note:
-    // - `resolve()` is used to handle symlinks
-    // - `includes()` is used to handle cases where the file extension was omitted when passed to node
-
-    if (process.argv.length > 1) {
-        const path = await import("path");
-        const url = await import("url");
-
-        const pathToThisFile = path.resolve(url.fileURLToPath(import.meta.url));
-        const pathPassedToNode = path.resolve(process.argv[1]);
-        const isThisFileBeingRunViaCLI =
-            pathToThisFile.includes(pathPassedToNode);
-
-        if (isThisFileBeingRunViaCLI) {
-            runCLI();
-        }
-    }
-}

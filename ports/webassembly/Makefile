@@ -37,9 +37,6 @@ include $(TOP)/extmod/extmod.mk
 
 CC = emcc
 LD = emcc
-NODE ?= node
-TERSER ?= npx terser
-
 INC += -I.
 INC += -I$(TOP)
 INC += -I$(BUILD)
@@ -54,6 +51,9 @@ EXPORTED_FUNCTIONS_EXTRA += ,\
 	_mp_js_do_exec_async,\
 	_mp_js_do_import,\
 	_mp_js_register_js_module,\
+	_mp_js_repl_init,\
+	_mp_js_repl_process_char,\
+	_mp_js_repl_process_char_async,\
 	_proxy_c_free_obj,\
 	_proxy_c_init,\
 	_proxy_c_to_js_call,\
@@ -82,8 +82,6 @@ JSFLAGS += -s EXPORTED_FUNCTIONS="\
 	_free,\
 	_malloc,\
 	_mp_js_init,\
-	_mp_js_repl_init,\
-	_mp_js_repl_process_char,\
 	_mp_hal_get_interrupt_char,\
 	_mp_sched_keyboard_interrupt$(EXPORTED_FUNCTIONS_EXTRA)"
 JSFLAGS += -s EXPORTED_RUNTIME_METHODS="\
@@ -93,6 +91,21 @@ JSFLAGS += -s EXPORTED_RUNTIME_METHODS="\
 JSFLAGS += --js-library library.js
 JSFLAGS += -s SUPPORT_LONGJMP=emscripten
 JSFLAGS += -s MODULARIZE -s EXPORT_NAME=_createMicroPythonModule
+# Browser main thread and dedicated Web Worker only; exclude Node.js / shell shims.
+JSFLAGS += -s ENVIRONMENT=web,worker
+
+# Grow the WASM linear memory when the MicroPython GC/C allocator needs it.
+# These can be overridden on the make command line.  The maximum is an upper
+# bound, not a reservation or a promise that the browser can allocate it.
+WASM_INITIAL_MEMORY ?= 67108864
+WASM_MAXIMUM_MEMORY ?= 2147483648
+WASM_STACK_SIZE ?= 131072
+WASM_MEMORY_GROWTH_STEP ?= 0.2
+JSFLAGS += -s ALLOW_MEMORY_GROWTH=1
+JSFLAGS += -s INITIAL_MEMORY=$(WASM_INITIAL_MEMORY)
+JSFLAGS += -s MAXIMUM_MEMORY=$(WASM_MAXIMUM_MEMORY)
+JSFLAGS += -s MEMORY_GROWTH_GEOMETRIC_STEP=$(WASM_MEMORY_GROWTH_STEP)
+JSFLAGS += -s STACK_SIZE=$(WASM_STACK_SIZE)
 
 ################################################################################
 # Source files and libraries.
@@ -129,7 +142,7 @@ OBJ += $(addprefix $(BUILD)/, $(SRC_C:.c=.o))
 ################################################################################
 # Main targets.
 
-.PHONY: all repl min test test//% test_min
+.PHONY: all
 
 all: $(BUILD)/micropython.mjs
 
@@ -137,23 +150,6 @@ $(BUILD)/micropython.mjs: $(OBJ) library.js $(SRC_JS)
 	$(ECHO) "LINK $@"
 	$(Q)emcc $(LDFLAGS) -o $@ $(OBJ) $(JSFLAGS)
 	$(Q)cat $(SRC_JS) >> $@
-
-$(BUILD)/micropython.min.mjs: $(BUILD)/micropython.mjs
-	$(TERSER) $< --compress --module -o $@
-
-repl: $(BUILD)/micropython.mjs
-	$(NODE) $<
-
-min: $(BUILD)/micropython.min.mjs
-
-test: $(BUILD)/micropython.mjs $(TOP)/tests/run-tests.py
-	cd $(TOP)/tests && MICROPY_MICROPYTHON_MJS=../ports/webassembly/$< ./run-tests.py -t webassembly
-
-test//%: $(BUILD)/micropython.mjs $(TOP)/tests/run-tests.py
-	cd $(TOP)/tests && MICROPY_MICROPYTHON_MJS=../ports/webassembly/$< ./run-tests.py -t webassembly -i "$*"
-
-test_min: $(BUILD)/micropython.min.mjs $(TOP)/tests/run-tests.py
-	cd $(TOP)/tests && MICROPY_MICROPYTHON_MJS=../ports/webassembly/$< ./run-tests.py -t webassembly
 
 ################################################################################
 # Remaining make rules.

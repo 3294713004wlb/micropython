@@ -1,191 +1,81 @@
-MicroPython WebAssembly
-=======================
+# MicroPython WebAssembly — 浏览器专用构建
 
-MicroPython for [WebAssembly](https://webassembly.org/).
+本目录基于用户上传的最新 WebAssembly 端口及定制版 v1.23 迁移结果，
+**仅支持浏览器页面 / Dedicated Web Worker**。不提供 Node.js 运行时、
+Node CLI、REPL 或依赖 `npx` 的压缩目标。
 
-Dependencies
-------------
+## 保留
 
-Building the webassembly port bears the same requirements as the standard
-MicroPython ports with the addition of Emscripten, and optionally terser for
-the minified file.
+- `loadMicroPython`, `runPython`, `runPythonAsync`, `pyimport`, `registerJsModule` 和 Python 对象代理
+- `FS` 虚拟文件系统，用于现有 `esptool`、`kflash`、`avrdude` 等 Python CLI **代码**的运行（删除的是 Node 命令行入口，并非这些 Python 工具）
+- `stdout`、`stderr` 回调，适配网页终端；可选 `stdin` 回调
+- 浏览器 `asyncio` 调度、Asyncify、VM 协作让出、JS 中断请求
+- 自动分段 GC 堆、WASM 线性内存动态增长、`python3` 可选变体
 
-The output includes `micropython.mjs` (a JavaScript wrapper for the
-MicroPython runtime) and `micropython.wasm` (actual MicroPython compiled to
-WASM).
+## 构建
 
-Build instructions
-------------------
+将 `webassembly` 目录放到 MicroPython 仓库的 `ports/` 下，在根仓库准备好 `mpy-cross`、submodules 后：
 
-In order to build `micropython.mjs`, run:
-
-    $ make
-
-To generate the minified file `micropython.min.mjs`, run:
-
-    $ make min
-
-Running with Node.js
---------------------
-
-Access the repl with:
-
-    $ make repl
-
-This is the same as running:
-
-    $ node build-standard/micropython.mjs
-
-The initial MicroPython GC heap size may be modified using:
-
-    $ node build-standard/micropython.mjs -X heapsize=64k
-
-Where stack size may be represented in bytes, or have a `k` or `m` suffix.
-
-MicroPython scripts may be executed using:
-
-    $ node build-standard/micropython.mjs hello.py
-
-Alternatively `micropython.mjs` may by accessed by other JavaScript programs in node
-using the require command and the general API outlined below. For example:
-
-```javascript
-const mp_mjs = await import("micropython.mjs");
-const mp = await mp_mjs.loadMicroPython();
-
-mp.runPython("print('hello world')");
+```bash
+cd ports/webassembly
+make VARIANT=standard -j4
+# 需要冻结更多纯 Python 标准库时：
+make VARIANT=python3 -j4
 ```
 
-Or without await notation:
+产物在 `build-standard/` 或 `build-python3/`：`micropython.mjs` 与 `micropython.wasm`。
+无需 Node.js 运行时或 Node CLI；依然需要构建工具 Emscripten / GNU Make。
+`-s ENVIRONMENT=web,worker` 使输出不包含 Emscripten 的 Node 环境兼容分支。
+
+## 浏览器 Worker 示例
 
 ```javascript
-import("micropython.mjs").then((mp_mjs) => {
-    mp_mjs.loadMicroPython().then((mp) => {
-        mp.runPython("print('hello world')");
-    });
+import { loadMicroPython } from './micropython.mjs';
+
+const mp = await loadMicroPython({
+  heapsize: 32 * 1024 * 1024,
+  stdout: line => postMessage({ type: 'stdout', text: line }),
+  stderr: line => postMessage({ type: 'stderr', text: line }),
 });
+await mp.runPython('import gc, asyncio; print(gc.mem_free())');
+// 每次任务运行完成，由主线程决定是否终止当前 Worker。
 ```
 
-Running with HTML
------------------
+**注意：** 由于 Asyncify，`runPython()` / `runPythonAsync()` 都返回 Promise，必须 `await`。
+内存最大值 2GiB 是配置上限，并非实际可用内存的保证。
+避免跨异步挂起缓存 WASM 内存 TypedArray 视图。
 
-The following code demonstrates the simplest way to load `micropython.mjs` in a
-browser, create an interpreter context, and run some Python code:
+## 验证
 
-```html
-<!doctype html>
-<html>
-  <head>
-    <script src="build-standard/micropython.mjs" type="module"></script>
-  </head>
-  <body>
-    <script type="module">
-      const mp = await loadMicroPython();
-      mp.runPython("print('hello world')");
-    </script>
-  </body>
-</html>
-```
+使用 HTTP 本地服务访问 `port-tests/browser-smoke.html`，点击页面测试按钮即可在真实浏览器和 Worker 中验证 asyncio、动态堆扩容及桥接。
+`file://` 协议通常无法加载 WASM 模块，请用 localhost 或 HTTPS。
 
-The output in the above example will go to the JavaScript console.  It's possible
-to instead capture the output and print it somewhere else, for example in an
-HTML element.  The following example shows how to do this, and also demonstrates
-the use of top-level await and the `js` module:
+## 浏览器 REPL 与 Node CLI 的区别
 
-```html
-<!doctype html>
-<html>
-  <head>
-    <script src="build-standard/micropython.mjs" type="module"></script>
-  </head>
-  <body>
-    <pre id="micropython-stdout"></pre>
-    <script type="module">
-      const stdoutWriter = (line) => {
-        document.getElementById("micropython-stdout").innerText += line + "\n";
-      };
-      const mp = await loadMicroPython({stdout:stdoutWriter});
-      await mp.runPythonAsync(`
-        import js
-        url = "https://api.github.com/users/micropython"
-        print(f"fetching {url}...")
-        res = await js.fetch(url)
-        json = await res.json()
-        for i in dir(json):
-          print(f"{i}: {json[i]}")
-      `);
-    </script>
-  </body>
-</html>
-```
+只移除 Node.js 的 `runCLI()`、`process.stdin`、`node_run.sh` 和 `make repl` 等启动入口。
+浏览器在线 REPL 必须保留 `shared/runtime/pyexec.c`、`shared/readline/readline.c`、
+`MICROPY_REPL_EVENT_DRIVEN=1`，以及 `replInit()` / `replProcessCharWithAsyncify()`。
 
-MicroPython code execution will suspend the browser so be sure to atomize usage
-within this environment. Unfortunately interrupts have not been implemented for the
-browser.
+典型浏览器 Worker 接口（输出建议 `linebuffer:false`，否则 `>>> ` 提示符不即时显示；主线程可使用 xterm.js）：
 
-In Node.js, pressing Ctrl+C during Python execution sends a keyboard interrupt
-(``KeyboardInterrupt``) to the running MicroPython instance via ``mp_js_hook``,
-which periodically polls stdin for the interrupt character.
-
-Testing
--------
-
-Run the test suite using:
-
-    $ make test
-
-API
----
-
-The following functions have been exposed to JavaScript through the interpreter
-context, created and returned by `loadMicroPython()`.
-
-- `PyProxy`: the type of the object that proxies Python objects.
-
-- `FS`: the Emscripten filesystem object.
-
-- `globals`: an object exposing the globals from the Python `__main__` module,
-  with methods `get(key)`, `set(key, value)` and `delete(key)`.
-
-- `registerJsModule(name, module)`: register a JavaScript object as importable
-  from Python with the given name.
-
-- `pyimport`: import a Python module and return it.
-
-- `runPython(code)`: execute Python code and return the result.
-
-- `runPythonAsync(code)`: execute Python code and return the result, allowing for
-  top-level await expressions (this call must be await'ed on the JavaScript side).
-
-- `replInit()`: initialise the REPL.
-
-- `replProcessChar(chr)`: process an incoming character at the REPL.
-
-- `replProcessCharWithAsyncify(chr)`: process an incoming character at the REPL,
-  for use when ASYNCIFY is enabled.
-
-Type conversions
-----------------
-
-Read-only objects (booleanns, numbers, strings, etc) are converted when passed between
-Python and JavaScript.  The conversions are:
-
-- JavaScript `null` converts to/from Python `None`.
-- JavaScript `undefined` converts to/from Python `js.undefined`.
-
-The conversion between `null` and `None` matches the behaviour of the Python `json`
-module.
-
-Proxying
---------
-
-A Python `dict` instance is proxied such that:
-
-    for (const key in dict) {
-        print(key, dict[key]);
+```js
+const mp = await loadMicroPython({
+    heapsize: 32 * 1024 * 1024,
+    linebuffer: false,
+    stdout: bytes => postMessage({ type: "stdout", bytes }),
+    stderr: bytes => postMessage({ type: "stderr", bytes }),
+});
+mp.replInit();
+const encoder = new TextEncoder();
+self.onmessage = async ({ data }) => {
+    if (data?.type !== "terminal-input") return;
+    for (const byte of encoder.encode(data.text)) {
+        await mp.replProcessCharWithAsyncify(byte);
     }
+};
+```
 
-works as expected on the JavaScript side and iterates through the keys of the
-Python `dict`.  Furthermore, when JavaScript accesses a key that does not exist
-in the Python dict, the JavaScript code receives `undefined` instead of a
-`KeyError` exception being raised.
+`replProcessChar()` 为同步兼容接口；可能触发 Asyncify 的 Python 代码请使用异步 API。
+`input()` 虽会重新参与链接，但上游 `mphalport.h` 的 `mp_hal_stdin_rx_chr()`
+目前仍为 `(0)` 占位实现；REPL 中运行 `input()` 还需要独立的浏览器 stdin
+桥接或 Worker 输入队列，`replProcessChar()` 并不等同于程序运行期间的 stdin。

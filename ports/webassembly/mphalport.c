@@ -24,6 +24,7 @@
  * THE SOFTWARE.
  */
 
+#include <emscripten.h>
 #include <unistd.h>
 #include "py/mphal.h"
 #include "library.h"
@@ -39,9 +40,29 @@ mp_uint_t mp_hal_stdout_tx_strn(const char *str, size_t len) {
     return write(1, str, len);
 }
 
+extern bool mp_wasm_asyncify_can_yield(void);
+
+// Matches the original customized v1.23 event-check entry point.
+void mp_hal_process_events(void) {
+    mp_js_hook();
+}
+
+void mp_wasm_vm_yield(void) {
+    if (mp_wasm_asyncify_can_yield()) {
+        emscripten_sleep(0);
+    }
+}
+
 void mp_hal_delay_ms(mp_uint_t ms) {
-    uint32_t start = mp_hal_ticks_ms();
-    while (mp_hal_ticks_ms() - start < ms) {
+    // Original project used Asyncify for larger sleeps so serial/USB JS
+    // promises and browser messages continue to be processed.
+    if (ms > 10 && mp_wasm_asyncify_can_yield()) {
+        emscripten_sleep((unsigned int)ms);
+    } else {
+        // A sync entry point cannot unwind; keep small delays synchronous.
+        uint32_t start = mp_hal_ticks_ms();
+        while (mp_hal_ticks_ms() - start < ms) {
+        }
     }
 }
 

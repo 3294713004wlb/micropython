@@ -51,6 +51,18 @@
 static size_t external_call_depth = 0;
 #endif
 
+// A VM hook can suspend only while a JS caller used the Asyncify-enabled
+// runPython()/runPythonAsync() wrapper.  pyimport and proxy calls are sync.
+static bool wasm_asyncify_exec_active = false;
+
+bool mp_wasm_asyncify_can_yield(void) {
+    #if MICROPY_GC_SPLIT_HEAP_AUTO
+    return wasm_asyncify_exec_active && external_call_depth == 1;
+    #else
+    return wasm_asyncify_exec_active;
+    #endif
+}
+
 // Emscripten defaults to a 64k C-stack, so our limit should be less than that.
 #define CSTACK_SIZE (32 * 1024)
 
@@ -73,16 +85,31 @@ void external_call_depth_dec(mp_obj_t root_obj) {
     #endif
 }
 
-void mp_js_init(int pystack_size, int heap_size) {
+// 0 on success; -1 for an invalid size or insufficient initial memory.
+// The JS API checks this status before registering/using Python objects.
+int mp_js_init(int pystack_size, int heap_size) {
+    if (pystack_size < 256 || pystack_size > 1024 * 1024 ||
+        heap_size < 64 * 1024 || heap_size > 1024 * 1024 * 1024) {
+        return -1;
+    }
     mp_cstack_init_with_sp_here(CSTACK_SIZE);
 
     #if MICROPY_ENABLE_PYSTACK
-    mp_obj_t *pystack = (mp_obj_t *)malloc(pystack_size * sizeof(mp_obj_t));
+    mp_obj_t *pystack = (mp_obj_t *)malloc((size_t)pystack_size * sizeof(mp_obj_t));
+    if (pystack == NULL) {
+        return -1;
+    }
     mp_pystack_init(pystack, pystack + pystack_size);
     #endif
 
     #if MICROPY_ENABLE_GC
-    char *heap = (char *)malloc(heap_size * sizeof(char));
+    char *heap = (char *)malloc((size_t)heap_size);
+    if (heap == NULL) {
+        #if MICROPY_ENABLE_PYSTACK
+        free(pystack);
+        #endif
+        return -1;
+    }
     gc_init(heap, heap + heap_size);
     #endif
 
@@ -108,6 +135,7 @@ void mp_js_init(int pystack_size, int heap_size) {
     }
     mp_obj_list_append(mp_sys_path, MP_OBJ_NEW_QSTR(MP_QSTR__slash_lib));
     #endif
+    return 0;
 }
 
 void mp_js_register_js_module(const char *name, uint32_t *value) {
@@ -147,6 +175,8 @@ void mp_js_do_import(const char *name, uint32_t *out) {
 }
 
 void mp_js_do_exec(const char *src, size_t len, uint32_t *out) {
+    bool prev_asyncify_exec_active = wasm_asyncify_exec_active;
+    wasm_asyncify_exec_active = true;
     external_call_depth_inc();
     mp_parse_input_kind_t input_kind = MP_PARSE_FILE_INPUT;
     nlr_buf_t nlr;
@@ -164,6 +194,7 @@ void mp_js_do_exec(const char *src, size_t len, uint32_t *out) {
         proxy_convert_mp_to_js_exc_cside(nlr.ret_val, out);
         external_call_depth_dec(nlr.ret_val);
     }
+    wasm_asyncify_exec_active = prev_asyncify_exec_active;
 }
 
 void mp_js_do_exec_async(const char *src, size_t len, uint32_t *out) {
@@ -172,15 +203,32 @@ void mp_js_do_exec_async(const char *src, size_t len, uint32_t *out) {
     mp_compile_allow_top_level_await = false;
 }
 
+// The browser invokes these entry points to implement an interactive Python
+// REPL. They are separate from the (removed) Node.js CLI launcher.
 void mp_js_repl_init(void) {
+    external_call_depth_inc();
     pyexec_event_repl_init();
+    external_call_depth_dec(MP_OBJ_NULL);
 }
 
-int mp_js_repl_process_char(int c) {
+static int mp_js_repl_process_char_impl(int c, bool allow_asyncify) {
+    bool prev_asyncify_exec_active = wasm_asyncify_exec_active;
+    // The synchronous entry point must not suspend, while the async one can
+    // yield to the browser and handle Asyncify-enabled Python calls.
+    wasm_asyncify_exec_active = allow_asyncify;
     external_call_depth_inc();
     int ret = pyexec_event_repl_process_char(c);
     external_call_depth_dec(MP_OBJ_NULL);
+    wasm_asyncify_exec_active = prev_asyncify_exec_active;
     return ret;
+}
+
+int mp_js_repl_process_char(int c) {
+    return mp_js_repl_process_char_impl(c, false);
+}
+
+int mp_js_repl_process_char_async(int c) {
+    return mp_js_repl_process_char_impl(c, true);
 }
 
 #if MICROPY_GC_SPLIT_HEAP_AUTO

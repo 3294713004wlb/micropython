@@ -75,19 +75,35 @@
 #endif
 
 // Whether the VM will periodically call mp_js_hook(), which checks for
-// interrupt characters on stdin (or equivalent input).
+// browser JS interrupt requests and VM event polling.
 #ifndef MICROPY_VARIANT_ENABLE_JS_HOOK
 #define MICROPY_VARIANT_ENABLE_JS_HOOK (0)
 #endif
 
+// Original v1.23 project hook checked JS input every 10 VM polls and
+// cooperatively yielded to the browser every 255 polls.  The latest runtime
+// may also be entered synchronously (pyimport, PyProxy), so yield ONLY when
+// an Asyncify-capable execution entry point is active.
 #if MICROPY_VARIANT_ENABLE_JS_HOOK
+#ifndef MICROPY_WASM_VM_YIELD_INTERVAL
+#define MICROPY_WASM_VM_YIELD_INTERVAL (255)
+#endif
 #define MICROPY_VM_HOOK_COUNT (10)
-#define MICROPY_VM_HOOK_INIT static uint vm_hook_divisor = MICROPY_VM_HOOK_COUNT;
-#define MICROPY_VM_HOOK_POLL if (--vm_hook_divisor == 0) { \
+#define MICROPY_VM_HOOK_INIT \
+    static uint vm_hook_divisor = MICROPY_VM_HOOK_COUNT; \
+    static uint vm_yield_divisor = MICROPY_WASM_VM_YIELD_INTERVAL;
+#define MICROPY_VM_HOOK_POLL do { \
+    if (--vm_hook_divisor == 0) { \
         vm_hook_divisor = MICROPY_VM_HOOK_COUNT; \
-        extern void mp_js_hook(void); \
-        mp_js_hook(); \
-}
+        extern void mp_hal_process_events(void); \
+        mp_hal_process_events(); \
+    } \
+    if (--vm_yield_divisor == 0) { \
+        vm_yield_divisor = MICROPY_WASM_VM_YIELD_INTERVAL; \
+        extern void mp_wasm_vm_yield(void); \
+        mp_wasm_vm_yield(); \
+    } \
+} while (0);
 #define MICROPY_VM_HOOK_LOOP MICROPY_VM_HOOK_POLL
 #define MICROPY_VM_HOOK_RETURN MICROPY_VM_HOOK_POLL
 #endif
