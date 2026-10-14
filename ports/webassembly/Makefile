@@ -22,6 +22,15 @@ BUILD ?= build-$(VARIANT)
 include ../../py/mkenv.mk
 include $(VARIANT_DIR)/mpconfigvariant.mk
 
+# Build FATFS and both LittleFS formats into every browser/Worker variant.
+# extmod/extmod.mk translates these options into preprocessor definitions,
+# pulls in lib/oofatfs and lib/littlefs sources, and registers VFS classes.
+# Keep the Make and C feature switches in sync by setting them here, before
+# including extmod.mk.  Each feature can be disabled with make NAME=0.
+MICROPY_VFS_FAT ?= 1
+MICROPY_VFS_LFS1 ?= 1
+MICROPY_VFS_LFS2 ?= 1
+
 # Use the default frozen manifest, variants may override this.
 FROZEN_MANIFEST ?= variants/manifest.py
 
@@ -119,6 +128,7 @@ SRC_SHARED = $(addprefix shared/,\
 	)
 
 SRC_C += \
+	fatfs_port.c \
 	lexer_dedent.c \
 	main.c \
 	modjs.c \

@@ -64,6 +64,22 @@
 #define MICROPY_VFS                 (1)
 #endif
 #define MICROPY_VFS_POSIX           (MICROPY_VFS)
+
+// Keep the POSIX filesystem for Emscripten FS, while FATFS and LittleFS are
+// registered by extmod.mk based on MICROPY_VFS_FAT/LFS1/LFS2 Make variables.
+// FATFS requires GC finalisers; the full-featured variants already provide
+// them, but set it explicitly so VFS support is not profile-dependent.
+#define MICROPY_ENABLE_FINALISER   (1)
+
+#if MICROPY_VFS_FAT
+// Enable long FAT filenames, including paths inside ESP32 partition images.
+// 2 allocates the LFN working buffer on the C stack, avoiding shared globals.
+#define MICROPY_FATFS_ENABLE_LFN   (2)
+// Accept either 512-byte or 4096-byte FAT sectors in a block-device image.
+#define MICROPY_FATFS_MAX_SS      (4096)
+// Support paths relative to the FAT volume working directory.
+#define MICROPY_FATFS_RPATH       (2)
+#endif
 #define MICROPY_PY_SYS_PLATFORM     "webassembly"
 
 #ifndef MICROPY_PY_JS

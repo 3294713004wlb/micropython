@@ -27,6 +27,53 @@ make VARIANT=python3 -j4
 无需 Node.js 运行时或 Node CLI；依然需要构建工具 Emscripten / GNU Make。
 `-s ENVIRONMENT=web,worker` 使输出不包含 Emscripten 的 Node 环境兼容分支。
 
+## FATFS / LittleFS 支持
+
+所有变体（`standard`、`python3`、`pyscript`）均默认包含下列 VFS 类，
+同时保留 `VfsPosix`，不改变浏览器的 Emscripten FS 行为：
+
+| VFS 类 | 编译开关 | 底层代码 |
+| --- | --- | --- |
+| `vfs.VfsFat` | `MICROPY_VFS_FAT=1` | `lib/oofatfs` |
+| `vfs.VfsLfs1` | `MICROPY_VFS_LFS1=1` | `lib/littlefs/lfs1*` |
+| `vfs.VfsLfs2` | `MICROPY_VFS_LFS2=1` | `lib/littlefs/lfs2*` |
+
+`Makefile` 在 `extmod/extmod.mk` 之前设置这三个变量。后者负责
+加入源文件及 `-D` 预处理宏，**不要只在头文件中定义 VFS 宏**，
+否则相关文件系统底层实现可能没有参与链接。
+
+FATFS 启用了长文件名（LFN）、512～4096 字节扇区及相对路径，
+`fatfs_port.c` 利用浏览器运行时的时间接口提供 FAT 文件时间戳。
+这些设置支持普通 FAT 镜像，**不负责 ESP-IDF FATFS Wear Leveling
+容器的解析**。读取这类 ESP32 分区前仍需处理 Wear Leveling 层。
+
+构建命令：
+
+```bash
+cd ports/webassembly
+make VARIANT=standard -j4
+make VARIANT=python3 -j4
+```
+
+按需关闭某一文件系统（修改编译选项后需清理对应构建目录）：
+
+```bash
+make VARIANT=standard MICROPY_VFS_LFS1=0 -j4
+```
+
+运行时首先检查是否成功注册：
+
+```python
+import vfs
+for name in ("VfsPosix", "VfsFat", "VfsLfs1", "VfsLfs2"):
+    print(name, hasattr(vfs, name))
+```
+
+`port-tests/vfs-smoke.py` 提供三个文件系统的 RAM 块设备格式化、
+挂载、文件读写和卸载冒烟测试，可加载至浏览器的 MicroPython 运行环境执行。
+需要先将 `lib/littlefs` 等 MicroPython 依赖源文件准备完整，
+本目录本身不是完整的 MicroPython 仓库。
+
 ## 浏览器 Worker 示例
 
 ```javascript
