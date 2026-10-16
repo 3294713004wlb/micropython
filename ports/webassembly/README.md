@@ -126,3 +126,117 @@ self.onmessage = async ({ data }) => {
 `input()` 虽会重新参与链接，但上游 `mphalport.h` 的 `mp_hal_stdin_rx_chr()`
 目前仍为 `(0)` 占位实现；REPL 中运行 `input()` 还需要独立的浏览器 stdin
 桥接或 Worker 输入队列，`replProcessChar()` 并不等同于程序运行期间的 stdin。
+
+## J-Link / libjaylink / pylink 分阶段集成（新增）
+
+项目现在包含 `usermods/jlink_native`（MicroPython C 内置模块）、
+`compat/libusb_mpy.c`（libjaylink 用的 libusb API 兼容层，实际 USB I/O 经由已有
+Python `usb.core.Device.read/write`）、`python/pylink_integration/jlink_backend.py`
+（pylink 风格的阶段性适配入口）。这些源文件被纳入当前 WebAssembly Make 构建。
+
+**重要：压缩包内不包含 libjaylink 的上游 C 源码及 SEGGER DLL。**
+构建环境可联网后，需要先执行：
+
+```bash
+cd ports/webassembly
+./usermods/jlink_native/fetch-libjaylink.sh
+make VARIANT=standard clean
+make VARIANT=standard -j4
+```
+
+`fetch-libjaylink.sh` 默认获取上游仓库。为可重复构建，建议设置
+`LIBJAYLINK_REV=<具体提交哈希>`；源码也可以手工放到
+`usermods/jlink_native/vendor/libjaylink`。此脚本不会修改已有的上游 checkout。
+
+如果**没有**下载上游源码，原生模块仍能编译为 **transport-only** 模式，
+可以测试 C ↔ Python USB 调用，但执行 `jaylink_native.firmware_version()` 会
+明确抛出 `NotImplementedError`。上游源码存在时，构建会编入核心协议和
+USB transport，并尝试通过 Python USB 调用查询真实 J-Link 固件版本。
+**这段完整链路尚未在 Emscripten 或真实 J-Link 设备上验证。**
+
+Python 侧使用方法（`usb.core` 的设备需已在网页设备管理器中配对，
+由原有 WebUSB 桥接实现同步读写）：
+
+```python
+import usb.core
+import jaylink_native
+
+usb = usb.core.find(idVendor=0x1366)
+if usb is None:
+    raise RuntimeError("J-Link not found")
+
+# 下列端点只是示例，必须从实际活动配置描述符获取。
+# 当前桥接仅针对 J-Link vendor interface 0、Bulk IN/OUT。
+jaylink_native.bind_usb(usb, 0x81, 0x02, 0, None)
+try:
+    print(jaylink_native.backend())
+    print(jaylink_native.firmware_version())
+finally:
+    jaylink_native.unbind_usb()
+```
+
+`python/pylink_integration/jlink_backend.py` 不会覆盖原本的 `pylink-square`
+（也不会试图在 WASM 中执行 SEGGER 的闭源 DLL）。原版 pylink 在 MicroPython 下
+若因 `ctypes` 导入失败，请直接使用冻结好的 `from jlink_backend import JLink`，
+不能靠 monkeypatch 修复一个尚未成功导入的包。兼容模式可将适配层复制至
+`lib/site-packages/jlink_backend.py`（此构建已经同时将该模块冻结），然后：
+
+```python
+import pylink
+from jlink_backend import install_into_pylink
+
+install_into_pylink(pylink)  # 显式启用浏览器兼容入口
+link = pylink.JLink()
+link.open(usb_device=usb, ep_in=0x81, ep_out=0x02)
+try:
+    print(link.firmware_version())
+finally:
+    link.close()
+```
+
+**目前并不支持** pylink `connect`、SWD 内存读写或 Flash 擦写；相关接口明确
+返回 `NotImplementedError`。后续要将原 pylink 所调用的 `JLINKARM_*`
+函数逐一映射到 libjaylink / CoreSight；libjaylink 本身不完整代替 SEGGER API。
+当前 libusb 兼容层特意只管理**单个已配对设备**：无浏览器设备发现、
+不抢占 WebUSB 权限、不关闭 Python 所拥有的 USB 设备，也不支持网络 J-Link。
+
+单元检查：
+
+```bash
+python3 port-tests/test-jlink-backend.py
+gcc -std=c99 -Wall -Wextra -Werror \
+    -Iusermods/jlink_native/compat \
+    port-tests/test-libusb-shim.c \
+    usermods/jlink_native/compat/libusb_mpy.c \
+    -o /tmp/jlink-shim-test
+/tmp/jlink-shim-test
+```
+
+MicroPython 编译后还可运行 `port-tests/jaylink-native-smoke.py` 检验 C →
+Python USB fake 设备的调用链。上游代码版本的许可证以 checkout 为准。
+如需恢复原始端口功能： `make JLINK_NATIVE=0 VARIANT=standard clean all`。
+
+
+### libjaylink WebAssembly USB-only 修复（2026-10-14）
+
+在浏览器中只使用通过 Python USB 接口连接的 J-Link，不需要 libjaylink 的
+TCP/IP 发现和 socket 通道。旧版 `micropython.mk` 将 `socket.c`、
+`discovery_tcp.c`、`transport_tcp.c` 也纳入编译，可能因 `fd_set`、
+`FD_ZERO`、`select` 等 POSIX Socket 符号编译失败。
+
+本版从 `JLINK_SOURCES` 排除了这三个 TCP 源文件，同时通过
+`compat/tcp_disabled.c` 为原有 libjaylink USB/TCP 分发器提供明确返回
+`JAYLINK_ERR` 的 TCP 占位函数，以解决后续可能出现的链接符号缺失。
+上游 libjaylink 源码无须修改。
+
+使用补丁时，只覆盖 `micropython.mk`、`compat/tcp_disabled.c`；保留已克隆的
+`vendor/libjaylink` 目录，然后执行：
+
+```bash
+make VARIANT=standard clean
+make VARIANT=standard -j4
+```
+
+已检查：TCP 兼容代码的 GCC `-Wall -Wextra -Werror` 语法，以及现有
+Python backend 和 libusb shim 的宿主机模拟测试。缺少 emcc 与真实
+libjaylink checkout，尚未执行完整 WASM 构建及 J-Link 实机测试。

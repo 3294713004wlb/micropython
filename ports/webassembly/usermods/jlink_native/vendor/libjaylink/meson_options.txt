@@ -1,0 +1,3 @@
+option('usb', type : 'feature', value : 'auto',
+  description : 'enable USB transport (requires libusb-1.0)'
+)

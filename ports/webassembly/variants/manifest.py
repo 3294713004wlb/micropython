@@ -22,3 +22,7 @@ package(
     base_path="$(PORT_DIR)",
     opt=3,
 )
+
+# Lightweight browser backend for pylink-square (no ctypes/DLL import).
+# The actual upstream pylink package remains an external Python library.
+module("jlink_backend.py", base_path="$(PORT_DIR)/python/pylink_integration", opt=2)

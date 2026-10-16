@@ -19,6 +19,13 @@ endif
 # If the build directory is not given, make it reflect the variant name.
 BUILD ?= build-$(VARIANT)
 
+# Register the browser J-Link native module without replacing other user modules.
+# Setting JLINK_NATIVE=0 retains the original port build.
+JLINK_NATIVE ?= 1
+ifeq ($(JLINK_NATIVE),1)
+override USER_C_MODULES += $(CURDIR)/usermods
+endif
+
 include ../../py/mkenv.mk
 include $(VARIANT_DIR)/mpconfigvariant.mk
 
@@ -128,6 +135,7 @@ SRC_SHARED = $(addprefix shared/,\
 	)
 
 SRC_C += \
+	modwasm_transport.c \
 	fatfs_port.c \
 	lexer_dedent.c \
 	main.c \
@@ -158,7 +166,7 @@ all: $(BUILD)/micropython.mjs
 
 $(BUILD)/micropython.mjs: $(OBJ) library.js $(SRC_JS)
 	$(ECHO) "LINK $@"
-	$(Q)emcc $(LDFLAGS) -o $@ $(OBJ) $(JSFLAGS)
+	$(Q)emcc $(LDFLAGS) -o $@ $(OBJ) $(LIBS) $(JSFLAGS)
 	$(Q)cat $(SRC_JS) >> $@
 
 ################################################################################
