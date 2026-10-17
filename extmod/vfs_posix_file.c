@@ -24,6 +24,8 @@
  * THE SOFTWARE.
  */
 
+#include <string.h>
+
 #include "py/mphal.h"
 #include "py/mpthread.h"
 #include "py/runtime.h"
@@ -44,6 +46,8 @@
 typedef struct _mp_obj_vfs_posix_file_t {
     mp_obj_base_t base;
     int fd;
+    mp_obj_t name;
+    mp_obj_t mode;
 } mp_obj_vfs_posix_file_t;
 
 #if MICROPY_CPYTHON_COMPAT
@@ -75,6 +79,10 @@ mp_obj_t mp_vfs_posix_file_open(const mp_obj_type_t *type, mp_obj_t file_in, mp_
                 mode_rw = O_WRONLY;
                 mode_x = O_CREAT | O_TRUNC;
                 break;
+            case 'x':
+                mode_rw = O_WRONLY;
+                mode_x = O_CREAT | O_EXCL;
+                break;
             case 'a':
                 mode_rw = O_WRONLY;
                 mode_x = O_CREAT | O_APPEND;
@@ -92,7 +100,9 @@ mp_obj_t mp_vfs_posix_file_open(const mp_obj_type_t *type, mp_obj_t file_in, mp_
     }
 
     mp_obj_vfs_posix_file_t *o = mp_obj_malloc_with_finaliser(mp_obj_vfs_posix_file_t, type);
-    o->fd = -1; // In case open() fails below, initialise this as a "closed" file object.
+    o->fd = -1; // In case open() fails, the object is closed.
+    o->name = file_in;
+    o->mode = mode_in;
 
     mp_obj_t fid = file_in;
 
@@ -103,7 +113,7 @@ mp_obj_t mp_vfs_posix_file_open(const mp_obj_type_t *type, mp_obj_t file_in, mp_
 
     const char *fname = mp_obj_str_get_str(fid);
     int fd;
-    MP_HAL_RETRY_SYSCALL(fd, open(fname, mode_x | mode_rw, 0644), mp_raise_OSError(err));
+    MP_HAL_RETRY_SYSCALL(fd, open(fname, mode_x | mode_rw, 0644), mp_raise_OSError_with_filename(err, fname));
     o->fd = fd;
     return MP_OBJ_FROM_PTR(o);
 }
@@ -114,6 +124,37 @@ static mp_obj_t vfs_posix_file_fileno(mp_obj_t self_in) {
     return MP_OBJ_NEW_SMALL_INT(self->fd);
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(vfs_posix_file_fileno_obj, vfs_posix_file_fileno);
+
+// Introspection methods used by io consumers in Python 3.10.
+static mp_obj_t vfs_posix_file_readable(mp_obj_t self_in) {
+    mp_obj_vfs_posix_file_t *self = MP_OBJ_TO_PTR(self_in);
+    check_fd_is_open(self);
+    if (self->mode == MP_OBJ_NULL) {
+        return mp_obj_new_bool(self->fd == STDIN_FILENO);
+    }
+    const char *mode = mp_obj_str_get_str(self->mode);
+    return mp_obj_new_bool(strchr(mode, 'r') != NULL || strchr(mode, '+') != NULL);
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(vfs_posix_file_readable_obj, vfs_posix_file_readable);
+
+static mp_obj_t vfs_posix_file_writable(mp_obj_t self_in) {
+    mp_obj_vfs_posix_file_t *self = MP_OBJ_TO_PTR(self_in);
+    check_fd_is_open(self);
+    if (self->mode == MP_OBJ_NULL) {
+        return mp_obj_new_bool(self->fd == STDOUT_FILENO || self->fd == STDERR_FILENO);
+    }
+    const char *mode = mp_obj_str_get_str(self->mode);
+    return mp_obj_new_bool(strchr(mode, 'w') != NULL || strchr(mode, 'a') != NULL
+        || strchr(mode, 'x') != NULL || strchr(mode, '+') != NULL);
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(vfs_posix_file_writable_obj, vfs_posix_file_writable);
+
+static mp_obj_t vfs_posix_file_seekable(mp_obj_t self_in) {
+    mp_obj_vfs_posix_file_t *self = MP_OBJ_TO_PTR(self_in);
+    check_fd_is_open(self);
+    return mp_obj_new_bool(lseek(self->fd, 0, SEEK_CUR) != (off_t)-1);
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(vfs_posix_file_seekable_obj, vfs_posix_file_seekable);
 
 static mp_uint_t vfs_posix_file_read(mp_obj_t o_in, void *buf, mp_uint_t size, int *errcode) {
     mp_obj_vfs_posix_file_t *o = MP_OBJ_TO_PTR(o_in);
@@ -252,8 +293,32 @@ static mp_uint_t vfs_posix_file_ioctl(mp_obj_t o_in, mp_uint_t request, uintptr_
     }
 }
 
+// Both text and binary streams expose name/mode without Python wrappers.
+// Standard streams use their descriptor and a conventional default mode.
+static void vfs_posix_file_attr(mp_obj_t self_in, qstr attr, mp_obj_t *dest) {
+    if (dest[0] != MP_OBJ_NULL) {
+        return;
+    }
+    mp_obj_vfs_posix_file_t *self = MP_OBJ_TO_PTR(self_in);
+    if (attr == MP_QSTR_closed) {
+        dest[0] = mp_obj_new_bool(self->fd < 0);
+    } else if (attr == MP_QSTR_name) {
+        dest[0] = self->name != MP_OBJ_NULL
+            ? self->name : MP_OBJ_NEW_SMALL_INT(self->fd);
+    } else if (attr == MP_QSTR_mode) {
+        dest[0] = self->mode != MP_OBJ_NULL ? self->mode
+            : MP_OBJ_NEW_QSTR(self->fd == STDIN_FILENO ? MP_QSTR_r : MP_QSTR_w);
+    } else {
+        // Continue resolving read/write/seek/etc from the stream locals dict.
+        dest[1] = MP_OBJ_SENTINEL;
+    }
+}
+
 static const mp_rom_map_elem_t vfs_posix_rawfile_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_fileno), MP_ROM_PTR(&vfs_posix_file_fileno_obj) },
+    { MP_ROM_QSTR(MP_QSTR_readable), MP_ROM_PTR(&vfs_posix_file_readable_obj) },
+    { MP_ROM_QSTR(MP_QSTR_writable), MP_ROM_PTR(&vfs_posix_file_writable_obj) },
+    { MP_ROM_QSTR(MP_QSTR_seekable), MP_ROM_PTR(&vfs_posix_file_seekable_obj) },
     { MP_ROM_QSTR(MP_QSTR_read), MP_ROM_PTR(&mp_stream_read_obj) },
     { MP_ROM_QSTR(MP_QSTR_readinto), MP_ROM_PTR(&mp_stream_readinto_obj) },
     { MP_ROM_QSTR(MP_QSTR_readline), MP_ROM_PTR(&mp_stream_unbuffered_readline_obj) },
@@ -281,6 +346,7 @@ MP_DEFINE_CONST_OBJ_TYPE(
     MP_QSTR_FileIO,
     MP_TYPE_FLAG_ITER_IS_STREAM,
     print, vfs_posix_file_print,
+    attr, vfs_posix_file_attr,
     protocol, &vfs_posix_fileio_stream_p,
     locals_dict, &vfs_posix_rawfile_locals_dict
     );
@@ -294,9 +360,9 @@ static const mp_stream_p_t vfs_posix_textio_stream_p = {
 
 #if MICROPY_PY_SYS_STDIO_BUFFER
 
-mp_obj_vfs_posix_file_t mp_sys_stdin_buffer_obj = {{&mp_type_vfs_posix_fileio}, STDIN_FILENO};
-mp_obj_vfs_posix_file_t mp_sys_stdout_buffer_obj = {{&mp_type_vfs_posix_fileio}, STDOUT_FILENO};
-mp_obj_vfs_posix_file_t mp_sys_stderr_buffer_obj = {{&mp_type_vfs_posix_fileio}, STDERR_FILENO};
+mp_obj_vfs_posix_file_t mp_sys_stdin_buffer_obj = {{&mp_type_vfs_posix_fileio}, STDIN_FILENO, MP_OBJ_NULL, MP_OBJ_NULL};
+mp_obj_vfs_posix_file_t mp_sys_stdout_buffer_obj = {{&mp_type_vfs_posix_fileio}, STDOUT_FILENO, MP_OBJ_NULL, MP_OBJ_NULL};
+mp_obj_vfs_posix_file_t mp_sys_stderr_buffer_obj = {{&mp_type_vfs_posix_fileio}, STDERR_FILENO, MP_OBJ_NULL, MP_OBJ_NULL};
 
 // Forward declarations.
 mp_obj_vfs_posix_file_t mp_sys_stdin_obj;
@@ -304,6 +370,10 @@ mp_obj_vfs_posix_file_t mp_sys_stdout_obj;
 mp_obj_vfs_posix_file_t mp_sys_stderr_obj;
 
 static void vfs_posix_textio_attr(mp_obj_t self_in, qstr attr, mp_obj_t *dest) {
+    if (dest[0] == MP_OBJ_NULL && (attr == MP_QSTR_name || attr == MP_QSTR_mode || attr == MP_QSTR_closed)) {
+        vfs_posix_file_attr(self_in, attr, dest);
+        return;
+    }
     if (dest[0] != MP_OBJ_NULL) {
         // These objects are read-only.
         return;
@@ -333,7 +403,7 @@ static void vfs_posix_textio_attr(mp_obj_t self_in, qstr attr, mp_obj_t *dest) {
 
 #else
 
-#define VFS_POSIX_TEXTIO_TYPE_ATTR
+#define VFS_POSIX_TEXTIO_TYPE_ATTR attr, vfs_posix_file_attr,
 
 #endif // MICROPY_PY_SYS_STDIO_BUFFER
 
@@ -347,8 +417,8 @@ MP_DEFINE_CONST_OBJ_TYPE(
     locals_dict, &vfs_posix_rawfile_locals_dict
     );
 
-mp_obj_vfs_posix_file_t mp_sys_stdin_obj = {{&mp_type_vfs_posix_textio}, STDIN_FILENO};
-mp_obj_vfs_posix_file_t mp_sys_stdout_obj = {{&mp_type_vfs_posix_textio}, STDOUT_FILENO};
-mp_obj_vfs_posix_file_t mp_sys_stderr_obj = {{&mp_type_vfs_posix_textio}, STDERR_FILENO};
+mp_obj_vfs_posix_file_t mp_sys_stdin_obj = {{&mp_type_vfs_posix_textio}, STDIN_FILENO, MP_OBJ_NULL, MP_OBJ_NULL};
+mp_obj_vfs_posix_file_t mp_sys_stdout_obj = {{&mp_type_vfs_posix_textio}, STDOUT_FILENO, MP_OBJ_NULL, MP_OBJ_NULL};
+mp_obj_vfs_posix_file_t mp_sys_stderr_obj = {{&mp_type_vfs_posix_textio}, STDERR_FILENO, MP_OBJ_NULL, MP_OBJ_NULL};
 
 #endif // MICROPY_VFS_POSIX

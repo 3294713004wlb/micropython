@@ -27,43 +27,66 @@
 #include <emscripten.h>
 #include <unistd.h>
 #include "py/mphal.h"
+#include "py/runtime.h"
 #include "library.h"
+
+extern size_t wasm_transport_terminal_write(int stream, const char *data, size_t length);
 
 static void stderr_print_strn(void *env, const char *str, size_t len) {
     (void)env;
-    write(2, str, len);
+    wasm_transport_terminal_write(2, str, len);
 }
 
 const mp_print_t mp_stderr_print = {NULL, stderr_print_strn};
 
 mp_uint_t mp_hal_stdout_tx_strn(const char *str, size_t len) {
-    return write(1, str, len);
+    return wasm_transport_terminal_write(1, str, len);
 }
 
 extern bool mp_wasm_asyncify_can_yield(void);
 
-// Matches the original customized v1.23 event-check entry point.
+// VM-level cancellation must be read directly from shared WASM memory.
+// A synchronously running Python Worker cannot process a postMessage event.
+extern bool wasm_transport_cancelled(void);
+
 void mp_hal_process_events(void) {
+    if (wasm_transport_cancelled()) {
+        mp_raise_type(&mp_type_KeyboardInterrupt);
+    }
+#if !MICROPY_WASM_CLI_BUSY_DELAY
+    // Interactive/async profile also honors the legacy JS interrupt path
     mp_js_hook();
+#endif
 }
 
 void mp_wasm_vm_yield(void) {
+#if !MICROPY_WASM_CLI_BUSY_DELAY
     if (mp_wasm_asyncify_can_yield()) {
         emscripten_sleep(0);
     }
+#endif
 }
 
 void mp_hal_delay_ms(mp_uint_t ms) {
-    // Original project used Asyncify for larger sleeps so serial/USB JS
-    // promises and browser messages continue to be processed.
+#if MICROPY_WASM_CLI_BUSY_DELAY
+    // The CLI Worker must not rely on its JS event loop during synchronous
+    // Python execution. Device callbacks are served by a different context.
+    // This also keeps short pyOCD delays out of Asyncify unwind/rewind.
+    uint32_t start = mp_hal_ticks_ms();
+    while ((uint32_t)(mp_hal_ticks_ms() - start) < ms) {
+        if (wasm_transport_cancelled()) {
+            mp_raise_type(&mp_type_KeyboardInterrupt);
+        }
+    }
+#else
     if (ms > 10 && mp_wasm_asyncify_can_yield()) {
         emscripten_sleep((unsigned int)ms);
     } else {
-        // A sync entry point cannot unwind; keep small delays synchronous.
         uint32_t start = mp_hal_ticks_ms();
-        while (mp_hal_ticks_ms() - start < ms) {
+        while ((uint32_t)(mp_hal_ticks_ms() - start) < ms) {
         }
     }
+#endif
 }
 
 void mp_hal_delay_us(mp_uint_t us) {

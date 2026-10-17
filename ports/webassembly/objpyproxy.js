@@ -35,7 +35,7 @@ class PyProxy {
             return js_obj;
         }
 
-        const obj_data = Module._malloc(2 * 4);
+        const obj_data = proxy_malloc_or_throw(2 * 4);
         const type = Module.ccall(
             "proxy_c_to_js_get_type_and_data",
             "number",
@@ -46,7 +46,7 @@ class PyProxy {
         let js_obj_out;
         if (type === 1 || type === 2) {
             // List or tuple.
-            const item = Module._malloc(3 * 4);
+            const item = proxy_malloc_or_throw(3 * 4);
             const len = Module.getValue(obj_data, "i32");
             const items_ptr = Module.getValue(obj_data + 4, "i32");
             const js_array = [];
@@ -64,7 +64,7 @@ class PyProxy {
             js_obj_out = js_array;
         } else if (type === 3) {
             // Dict.
-            const item = Module._malloc(3 * 4);
+            const item = proxy_malloc_or_throw(3 * 4);
             const alloc = Module.getValue(obj_data, "i32");
             const table_ptr = Module.getValue(obj_data + 4, "i32");
             const js_dict = {};
@@ -121,7 +121,7 @@ const py_proxy_handler = {
         return true;
     },
     ownKeys(target) {
-        const value = Module._malloc(3 * 4);
+        const value = proxy_malloc_or_throw(3 * 4);
         Module.ccall(
             "proxy_c_to_js_dir",
             "null",
@@ -169,7 +169,7 @@ const py_proxy_handler = {
                     [target._ref],
                 );
                 return function* () {
-                    const value = Module._malloc(3 * 4);
+                    const value = proxy_malloc_or_throw(3 * 4);
                     while (true) {
                         const valid = Module.ccall(
                             "proxy_c_to_js_iternext",
@@ -188,7 +188,7 @@ const py_proxy_handler = {
             return undefined;
         }
 
-        const value = Module._malloc(3 * 4);
+        const value = proxy_malloc_or_throw(3 * 4);
         Module.ccall(
             "proxy_c_to_js_lookup_attr",
             "null",
@@ -198,7 +198,7 @@ const py_proxy_handler = {
         return proxy_convert_mp_to_js_obj_jsside_with_free(value);
     },
     set(target, prop, value) {
-        const value_conv = Module._malloc(3 * 4);
+        const value_conv = proxy_malloc_or_throw(3 * 4);
         proxy_convert_js_to_mp_obj_jsside(value, value_conv);
         const ret = Module.ccall(
             "proxy_c_to_js_store_attr",
@@ -226,7 +226,7 @@ class PyProxyThenable {
     }
 
     then(resolve, reject) {
-        const values = Module._malloc(3 * 3 * 4);
+        const values = proxy_malloc_or_throw(3 * 3 * 4);
         proxy_convert_js_to_mp_obj_jsside(resolve, values + 3 * 4);
         proxy_convert_js_to_mp_obj_jsside(reject, values + 2 * 3 * 4);
         Module.ccall(

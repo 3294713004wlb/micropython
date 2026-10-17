@@ -1,3 +1,7 @@
+> **共享内存协议 v5**：参见 [NATIVE_SHARED_TRANSPORT_PROTOCOL_V5.md](NATIVE_SHARED_TRANSPORT_PROTOCOL_V5.md)，修改协议时务必同时生成 C / JS 常量，并重新编译 WASM
+
+> **当前版本：原生共享内存传输 ABI v3。** WebUSB/WebHID 固定事务槽必须与配套的 Python Uploader v3 同时更新。旧 v1/v2 二进制不兼容。详见 `NATIVE_TRANSPORT_V3.md`。
+
 # MicroPython WebAssembly — 浏览器专用构建
 
 本目录基于用户上传的最新 WebAssembly 端口及定制版 v1.23 迁移结果，
@@ -240,3 +244,44 @@ make VARIANT=standard -j4
 已检查：TCP 兼容代码的 GCC `-Wall -Wextra -Werror` 语法，以及现有
 Python backend 和 libusb shim 的宿主机模拟测试。缺少 emcc 与真实
 libjaylink checkout，尚未执行完整 WASM 构建及 J-Link 实机测试。
+
+## 原生共享 WASM 内存传输（2026-10-16）
+
+当前 `Makefile` 增加 `-matomics -mbulk-memory`、`SHARED_MEMORY` 与
+`IMPORTED_MEMORY`，`modwasm_transport.c` 将 Serial/USB/HID 的载荷和事务状态
+直接存入共享 WASM 线性内存。由导出的 `wasm_transport_region()` / 
+`wasm_transport_region_size()` 与浏览器端进行初始化握手。
+
+此源码需要完整 MicroPython 仓库与 Emscripten 重新编译，并同时替换页面中的
+`micropython.mjs` 和 `micropython.wasm`。不能仅替换 `.wasm`。
+
+编译前请阅读 [SHARED_WASM_NATIVE_TRANSPORT.md](./SHARED_WASM_NATIVE_TRANSPORT.md)，
+其中包含设备接口语义、线程安全、浏览器端同步安装及验证限制。
+
+
+## pyOCD Asyncify 栈保护修复（2026-10-16）
+
+参见 [CLI_STACK_COOKIE_REPAIR_20261016.md](./CLI_STACK_COOKIE_REPAIR_20261016.md)。
+
+
+## 共享内存高性能传输 v4
+
+USB/HID、Serial、终端输出、设备元数据与运行时取消已统一改为共享内存通信。
+该版本不兼容旧 WASM，具体 ABI、构建和测试方式请参阅 `NATIVE_SHARED_TRANSPORT_PROTOCOL_V5.md`。
+
+## 同步 CLI 构建说明（2026-10-16）
+
+`WASM_NATIVE_CLI_PROFILE=1` 为默认配置，完全不链接 Asyncify；Python VM 的设备 I/O 与终端数据通过共享 WASM 线性内存交互。旧版说明中“所有 runPython 都需要 Asyncify”仅适用于可选的 `WASM_NATIVE_CLI_PROFILE=0` 异步变体。调用 `runPython()` 的 JS 方仍应使用 `await`，因为此公开 API 始终返回 Promise。协议构建与两端版本校验见 [NATIVE_SHARED_TRANSPORT_PROTOCOL_V5.md](NATIVE_SHARED_TRANSPORT_PROTOCOL_V5.md)。
+
+## Python 3.10 API compatibility (selected APIs)
+
+The native CLI variant now freezes `python/compat310/platform.py` exposing
+`platform.system()`, `machine()`, `node()`, `uname()`, `python_version()`
+and related inspection helpers. This deliberately reports Emscripten /
+MicroPython instead of masquerading as a different Python interpreter.
+
+The Uploader's installed Python standard library additionally supplies
+`dataclasses.asdict`, `astuple`, `replace`, and Python `zipfile` and
+`xml.etree.ElementTree` for CMSIS-Packs. Syntax features such as
+`metaclass=`, annotation-derived class fields, CPython's `EnumMeta`, and
+built-in `int(base=...)` remain outside this compatibility layer.

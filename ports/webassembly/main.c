@@ -145,6 +145,59 @@ void mp_js_register_js_module(const char *name, uint32_t *value) {
     mp_map_lookup(mp_loaded_modules_map, module_name, MP_MAP_LOOKUP_ADD_IF_NOT_FOUND)->value = module;
 }
 
+// Return the already-created __main__ globals dictionary directly.
+// Avoid invoking the import machinery during WASM bootstrapping. The JS
+// wrapper resolves this lazily only when the public globals API is used.
+/* Export the actual compiled execution mode to avoid a JS/WASM ABI mismatch. */
+int mp_js_native_cli_profile(void) {
+    #if MICROPY_WASM_CLI_BUSY_DELAY
+    return 1;
+    #else
+    return 0;
+    #endif
+}
+
+// Independent of the native device transport. The CLI can keep polling
+// SharedArrayBuffer while the collector uses Asyncify to scan Wasm locals.
+// JavaScript must enter Python with ccall({ async: true }) in this profile.
+int mp_js_gc_register_scan_asyncify(void) {
+    #if MICROPY_WASM_GC_REGISTER_SCAN_ASYNCIFY
+    return 1;
+    #else
+    return 0;
+    #endif
+}
+
+void mp_js_get_main_dict(uint32_t *out) {
+    external_call_depth_inc();
+    mp_obj_t dict = MP_OBJ_FROM_PTR(&MP_STATE_VM(dict_main));
+    proxy_convert_mp_to_js_obj_cside(dict, out);
+    external_call_depth_dec(dict);
+}
+
+/*
+ * Check that the top-level NLR frame remains active when control returns.
+ * If it was lost, a plain nlr_pop() can read address zero and install the
+ * Emscripten low-memory cookie as the next NLR pointer.
+ * This is a diagnostic fail-fast, never an excuse to silently skip popping.
+ */
+#ifndef MICROPY_WASM_NLR_GUARD
+#define MICROPY_WASM_NLR_GUARD (1)
+#endif
+
+static inline void wasm_nlr_pop_checked(nlr_buf_t *expected) {
+    #if MICROPY_WASM_NLR_GUARD
+    nlr_buf_t *actual = MP_STATE_THREAD(nlr_top);
+    if (actual != expected) {
+        fprintf(stderr,
+            "[wasm-nlr] frame mismatch: expected=%p actual=%p\n",
+            (void *)expected, (void *)actual);
+        abort();
+    }
+    #endif
+    nlr_pop();
+}
+
 void mp_js_do_import(const char *name, uint32_t *out) {
     external_call_depth_inc();
     nlr_buf_t nlr;
@@ -164,7 +217,7 @@ void mp_js_do_import(const char *name, uint32_t *out) {
                 }
             }
         }
-        nlr_pop();
+        wasm_nlr_pop_checked(&nlr);
         proxy_convert_mp_to_js_obj_cside(ret, out);
         external_call_depth_dec(ret);
     } else {
@@ -186,7 +239,7 @@ void mp_js_do_exec(const char *src, size_t len, uint32_t *out) {
         mp_parse_tree_t parse_tree = mp_parse(lex, input_kind);
         mp_obj_t module_fun = mp_compile(&parse_tree, source_name, false);
         mp_obj_t ret = mp_call_function_0(module_fun);
-        nlr_pop();
+        wasm_nlr_pop_checked(&nlr);
         proxy_convert_mp_to_js_obj_cside(ret, out);
         external_call_depth_dec(ret);
     } else {

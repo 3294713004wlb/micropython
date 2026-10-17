@@ -182,13 +182,18 @@ void mp_obj_exception_print(const mp_print_t *print, mp_obj_t o_in, mp_print_kin
 
         #if MICROPY_PY_ERRNO
         // try to provide a nice OSError error message
-        if (o->base.type == &mp_type_OSError && o->args->len > 0 && o->args->len < 3 && mp_obj_is_small_int(o->args->items[0])) {
+        if (mp_obj_is_subclass_fast(MP_OBJ_FROM_PTR(o->base.type), MP_OBJ_FROM_PTR(&mp_type_OSError))
+            && o->args->len > 0 && mp_obj_is_small_int(o->args->items[0])) {
             qstr qst = mp_errno_to_str(o->args->items[0]);
             if (qst != MP_QSTRnull) {
                 mp_printf(print, "[Errno " INT_FMT "] %q", MP_OBJ_SMALL_INT_VALUE(o->args->items[0]), qst);
                 if (o->args->len > 1) {
                     mp_print_str(print, ": ");
                     mp_obj_print_helper(print, o->args->items[1], PRINT_STR);
+                }
+                if (o->args->len > 2 && o->args->items[2] != mp_const_none) {
+                    mp_print_str(print, ": ");
+                    mp_obj_print_helper(print, o->args->items[2], PRINT_REPR);
                 }
                 return;
             }
@@ -206,6 +211,59 @@ void mp_obj_exception_print(const mp_print_t *print, mp_obj_t o_in, mp_print_kin
 
 mp_obj_t mp_obj_exception_make_new(const mp_obj_type_t *type, size_t n_args, size_t n_kw, const mp_obj_t *args) {
     mp_arg_check_num(n_args, n_kw, 0, MP_OBJ_FUN_ARGS_MAX, false);
+
+    // CPython 3.10: constructing OSError with a recognised errno selects
+    // its specific subclass. This also covers mp_raise_OSError() in VFS.
+    // Explicitly constructed subclasses retain their requested type.
+    if (type == &mp_type_OSError && n_args != 0 && mp_obj_is_small_int(args[0])) {
+        switch (MP_OBJ_SMALL_INT_VALUE(args[0])) {
+            case MP_EAGAIN:
+                type = &mp_type_BlockingIOError;
+                break;
+            case MP_ECHILD:
+                type = &mp_type_ChildProcessError;
+                break;
+            case MP_EPIPE:
+                type = &mp_type_BrokenPipeError;
+                break;
+            case MP_ECONNABORTED:
+                type = &mp_type_ConnectionAbortedError;
+                break;
+            case MP_ECONNREFUSED:
+                type = &mp_type_ConnectionRefusedError;
+                break;
+            case MP_ECONNRESET:
+                type = &mp_type_ConnectionResetError;
+                break;
+            case MP_EINTR:
+                type = &mp_type_InterruptedError;
+                break;
+            case MP_EISDIR:
+                type = &mp_type_IsADirectoryError;
+                break;
+            case MP_ENOTDIR:
+                type = &mp_type_NotADirectoryError;
+                break;
+            case MP_EACCES:
+            case MP_EPERM:
+                type = &mp_type_PermissionError;
+                break;
+            case MP_ESRCH:
+                type = &mp_type_ProcessLookupError;
+                break;
+            case MP_ETIMEDOUT:
+                type = &mp_type_TimeoutError;
+                break;
+            case MP_EEXIST:
+                type = &mp_type_FileExistsError;
+                break;
+            case MP_ENOENT:
+                type = &mp_type_FileNotFoundError;
+                break;
+            default:
+                break;
+        }
+    }
 
     // Try to allocate memory for the exception, with fallback to emergency exception object
     mp_obj_exception_t *o_exc = m_new_obj_maybe(mp_obj_exception_t);
@@ -268,6 +326,11 @@ void mp_obj_exception_attr(mp_obj_t self_in, qstr attr, mp_obj_t *dest) {
     mp_obj_exception_t *self = MP_OBJ_TO_PTR(self_in);
     if (dest[0] != MP_OBJ_NULL) {
         // store/delete attribute
+        if (attr == MP_QSTR_args && mp_obj_is_type(dest[1], &mp_type_tuple)) {
+            get_native_exception(self_in)->args = MP_OBJ_TO_PTR(dest[1]);
+            dest[0] = MP_OBJ_NULL;
+            return;
+        }
         if (attr == MP_QSTR___traceback__ && dest[1] == mp_const_none) {
             // We allow 'exc.__traceback__ = None' assignment as low-level
             // optimization of pre-allocating exception instance and raising
@@ -283,12 +346,71 @@ void mp_obj_exception_attr(mp_obj_t self_in, qstr attr, mp_obj_t *dest) {
     if (attr == MP_QSTR_args) {
         decompress_error_text_maybe(self);
         dest[0] = MP_OBJ_FROM_PTR(self->args);
-    } else if (attr == MP_QSTR_value || attr == MP_QSTR_errno) {
-        // These are aliases for args[0]: .value for StopIteration and .errno for OSError.
-        // For efficiency let these attributes apply to all exception instances.
+    } else if (attr == MP_QSTR_value) {
         dest[0] = mp_obj_exception_get_value(self_in);
+    } else if (mp_obj_is_subclass_fast(MP_OBJ_FROM_PTR(mp_obj_get_type(self_in)),
+        MP_OBJ_FROM_PTR(&mp_type_OSError))) {
+        if (attr == MP_QSTR_errno) {
+            dest[0] = self->args->len ? self->args->items[0] : mp_const_none;
+        } else if (attr == MP_QSTR_strerror) {
+            dest[0] = self->args->len > 1 ? self->args->items[1] : mp_const_none;
+        } else if (attr == MP_QSTR_filename) {
+            dest[0] = self->args->len > 2 ? self->args->items[2] : mp_const_none;
+        } else if (attr == MP_QSTR_filename2) {
+            dest[0] = self->args->len > 4 ? self->args->items[4] : mp_const_none;
+        }
     }
+    #if MICROPY_PY_BUILTINS_STR_UNICODE
+    else if (mp_obj_is_subclass_fast(MP_OBJ_FROM_PTR(mp_obj_get_type(self_in)),
+        MP_OBJ_FROM_PTR(&mp_type_UnicodeError))) {
+        // The codec exceptions store their CPython constructor fields in args.
+        // UnicodeTranslateError has no encoding argument.
+        bool translate = mp_obj_is_subclass_fast(
+            MP_OBJ_FROM_PTR(mp_obj_get_type(self_in)),
+            MP_OBJ_FROM_PTR(&mp_type_UnicodeTranslateError));
+        size_t count = self->args->len;
+        const mp_obj_t *items = self->args->items;
+        if (attr == MP_QSTR_encoding && !translate && count >= 5) {
+            dest[0] = items[0];
+        } else if (attr == MP_QSTR_object && count >= (translate ? 4 : 5)) {
+            dest[0] = items[translate ? 0 : 1];
+        } else if (attr == MP_QSTR_start && count >= (translate ? 4 : 5)) {
+            dest[0] = items[translate ? 1 : 2];
+        } else if (attr == MP_QSTR_end && count >= (translate ? 4 : 5)) {
+            dest[0] = items[translate ? 2 : 3];
+        } else if (attr == MP_QSTR_reason && count >= (translate ? 4 : 5)) {
+            dest[0] = items[translate ? 3 : 4];
+        }
+    }
+    #endif
 }
+
+// An exception can be reinitialised using RuntimeError.__init__(exc, ...),
+// BaseException.__init__(exc, ...), etc. Store the new args natively.
+static mp_obj_t exception_init(size_t n_args, const mp_obj_t *args) {
+    // A Python subclass can explicitly invoke RuntimeError.__init__(self, ...)
+    // before the native base storage has been created. Initialising the
+    // embedded native exception is valid here and avoids accessing a wrapper
+    // sentinel as an exception object.
+    if (!mp_obj_is_exception_type(MP_OBJ_FROM_PTR(mp_obj_get_type(args[0])))) {
+        mp_raise_TypeError(MP_ERROR_TEXT("exception argument required"));
+    }
+    if (!mp_obj_is_native_exception_instance(args[0])) {
+        mp_obj_instance_t *instance = MP_OBJ_TO_PTR(args[0]);
+        if (instance->subobj[0] == MP_OBJ_FROM_PTR(&mp_native_base_init_wrapper_obj)) {
+            instance->subobj[0] = mp_obj_exception_make_new(&mp_type_BaseException, 0, 0, NULL);
+        }
+    }
+    mp_obj_exception_t *self = get_native_exception(args[0]);
+    self->args = MP_OBJ_TO_PTR(mp_obj_new_tuple(n_args - 1, args + 1));
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(exception_init_obj, 1, MP_OBJ_FUN_ARGS_MAX, exception_init);
+
+static const mp_rom_map_elem_t base_exception_locals_table[] = {
+    { MP_ROM_QSTR(MP_QSTR___init__), MP_ROM_PTR(&exception_init_obj) },
+};
+static MP_DEFINE_CONST_DICT(base_exception_locals_dict, base_exception_locals_table);
 
 MP_DEFINE_CONST_OBJ_TYPE(
     mp_type_BaseException,
@@ -296,89 +418,90 @@ MP_DEFINE_CONST_OBJ_TYPE(
     MP_TYPE_FLAG_NONE,
     make_new, mp_obj_exception_make_new,
     print, mp_obj_exception_print,
-    attr, mp_obj_exception_attr
+    attr, mp_obj_exception_attr,
+    locals_dict, &base_exception_locals_dict
     );
 
-// *FORMAT-OFF*
-
-// List of all exceptions, arranged as in the table at:
-// http://docs.python.org/3/library/exceptions.html
+// Python 3.10 exception class hierarchy. All classes have their own type
+// object so subclass checks, catch clauses and repr() work natively.
 MP_DEFINE_EXCEPTION(SystemExit, BaseException)
 MP_DEFINE_EXCEPTION(KeyboardInterrupt, BaseException)
 MP_DEFINE_EXCEPTION(GeneratorExit, BaseException)
 MP_DEFINE_EXCEPTION(Exception, BaseException)
-  #if MICROPY_PY_ASYNC_AWAIT
-  MP_DEFINE_EXCEPTION(StopAsyncIteration, Exception)
-  #endif
-  MP_DEFINE_EXCEPTION(StopIteration, Exception)
-  MP_DEFINE_EXCEPTION(ArithmeticError, Exception)
-    //MP_DEFINE_EXCEPTION(FloatingPointError, ArithmeticError)
-    MP_DEFINE_EXCEPTION(OverflowError, ArithmeticError)
-    MP_DEFINE_EXCEPTION(ZeroDivisionError, ArithmeticError)
-  MP_DEFINE_EXCEPTION(AssertionError, Exception)
-  MP_DEFINE_EXCEPTION(AttributeError, Exception)
-  //MP_DEFINE_EXCEPTION(BufferError, Exception)
-  MP_DEFINE_EXCEPTION(EOFError, Exception)
-  MP_DEFINE_EXCEPTION(ImportError, Exception)
-  MP_DEFINE_EXCEPTION(LookupError, Exception)
-    MP_DEFINE_EXCEPTION(IndexError, LookupError)
-    MP_DEFINE_EXCEPTION(KeyError, LookupError)
-  MP_DEFINE_EXCEPTION(MemoryError, Exception)
-  MP_DEFINE_EXCEPTION(NameError, Exception)
-    /*
-    MP_DEFINE_EXCEPTION(UnboundLocalError, NameError)
-    */
-  MP_DEFINE_EXCEPTION(OSError, Exception)
-    /*
-    MP_DEFINE_EXCEPTION(BlockingIOError, OSError)
-    MP_DEFINE_EXCEPTION(ChildProcessError, OSError)
-    MP_DEFINE_EXCEPTION(ConnectionError, OSError)
-      MP_DEFINE_EXCEPTION(BrokenPipeError, ConnectionError)
-      MP_DEFINE_EXCEPTION(ConnectionAbortedError, ConnectionError)
-      MP_DEFINE_EXCEPTION(ConnectionRefusedError, ConnectionError)
-      MP_DEFINE_EXCEPTION(ConnectionResetError, ConnectionError)
-    MP_DEFINE_EXCEPTION(InterruptedError, OSError)
-    MP_DEFINE_EXCEPTION(IsADirectoryError, OSError)
-    MP_DEFINE_EXCEPTION(NotADirectoryError, OSError)
-    MP_DEFINE_EXCEPTION(PermissionError, OSError)
-    MP_DEFINE_EXCEPTION(ProcessLookupError, OSError)
-    MP_DEFINE_EXCEPTION(TimeoutError, OSError)
-    MP_DEFINE_EXCEPTION(FileExistsError, OSError)
-    MP_DEFINE_EXCEPTION(FileNotFoundError, OSError)
-    MP_DEFINE_EXCEPTION(ReferenceError, Exception)
-    */
-  MP_DEFINE_EXCEPTION(RuntimeError, Exception)
-    MP_DEFINE_EXCEPTION(NotImplementedError, RuntimeError)
-  MP_DEFINE_EXCEPTION(SyntaxError, Exception)
-    MP_DEFINE_EXCEPTION(IndentationError, SyntaxError)
-    /*
-      MP_DEFINE_EXCEPTION(TabError, IndentationError)
-      */
-  //MP_DEFINE_EXCEPTION(SystemError, Exception)
-  MP_DEFINE_EXCEPTION(TypeError, Exception)
+#if MICROPY_PY_ASYNC_AWAIT
+MP_DEFINE_EXCEPTION(StopAsyncIteration, Exception)
+#endif
+MP_DEFINE_EXCEPTION(StopIteration, Exception)
+MP_DEFINE_EXCEPTION(ArithmeticError, Exception)
+MP_DEFINE_EXCEPTION(OverflowError, ArithmeticError)
+MP_DEFINE_EXCEPTION(ZeroDivisionError, ArithmeticError)
+MP_DEFINE_EXCEPTION(AssertionError, Exception)
+MP_DEFINE_EXCEPTION(AttributeError, Exception)
+MP_DEFINE_EXCEPTION(EOFError, Exception)
+MP_DEFINE_EXCEPTION(ImportError, Exception)
+MP_DEFINE_EXCEPTION(LookupError, Exception)
+MP_DEFINE_EXCEPTION(IndexError, LookupError)
+MP_DEFINE_EXCEPTION(KeyError, LookupError)
+MP_DEFINE_EXCEPTION(MemoryError, Exception)
+MP_DEFINE_EXCEPTION(NameError, Exception)
+MP_DEFINE_EXCEPTION(OSError, Exception)
+MP_DEFINE_EXCEPTION(RuntimeError, Exception)
+MP_DEFINE_EXCEPTION(NotImplementedError, RuntimeError)
+MP_DEFINE_EXCEPTION(SyntaxError, Exception)
+MP_DEFINE_EXCEPTION(IndentationError, SyntaxError)
+MP_DEFINE_EXCEPTION(TypeError, Exception)
 #if MICROPY_EMIT_NATIVE
-    MP_DEFINE_EXCEPTION(ViperTypeError, TypeError)
+MP_DEFINE_EXCEPTION(ViperTypeError, TypeError)
 #endif
-  MP_DEFINE_EXCEPTION(ValueError, Exception)
+MP_DEFINE_EXCEPTION(ValueError, Exception)
 #if MICROPY_PY_BUILTINS_STR_UNICODE
-    MP_DEFINE_EXCEPTION(UnicodeError, ValueError)
-    //TODO: Implement more UnicodeError subclasses which take arguments
+MP_DEFINE_EXCEPTION(UnicodeError, ValueError)
 #endif
-  /*
-  MP_DEFINE_EXCEPTION(Warning, Exception)
-    MP_DEFINE_EXCEPTION(DeprecationWarning, Warning)
-    MP_DEFINE_EXCEPTION(PendingDeprecationWarning, Warning)
-    MP_DEFINE_EXCEPTION(RuntimeWarning, Warning)
-    MP_DEFINE_EXCEPTION(SyntaxWarning, Warning)
-    MP_DEFINE_EXCEPTION(UserWarning, Warning)
-    MP_DEFINE_EXCEPTION(FutureWarning, Warning)
-    MP_DEFINE_EXCEPTION(ImportWarning, Warning)
-    MP_DEFINE_EXCEPTION(UnicodeWarning, Warning)
-    MP_DEFINE_EXCEPTION(BytesWarning, Warning)
-    MP_DEFINE_EXCEPTION(ResourceWarning, Warning)
-    */
+MP_DEFINE_EXCEPTION(FloatingPointError, ArithmeticError)
+MP_DEFINE_EXCEPTION(BufferError, Exception)
+MP_DEFINE_EXCEPTION(ModuleNotFoundError, ImportError)
+MP_DEFINE_EXCEPTION(UnboundLocalError, NameError)
+MP_DEFINE_EXCEPTION(BlockingIOError, OSError)
+MP_DEFINE_EXCEPTION(ChildProcessError, OSError)
+MP_DEFINE_EXCEPTION(ConnectionError, OSError)
+MP_DEFINE_EXCEPTION(BrokenPipeError, ConnectionError)
+MP_DEFINE_EXCEPTION(ConnectionAbortedError, ConnectionError)
+MP_DEFINE_EXCEPTION(ConnectionRefusedError, ConnectionError)
+MP_DEFINE_EXCEPTION(ConnectionResetError, ConnectionError)
+MP_DEFINE_EXCEPTION(InterruptedError, OSError)
+MP_DEFINE_EXCEPTION(IsADirectoryError, OSError)
+MP_DEFINE_EXCEPTION(NotADirectoryError, OSError)
+MP_DEFINE_EXCEPTION(PermissionError, OSError)
+MP_DEFINE_EXCEPTION(ProcessLookupError, OSError)
+MP_DEFINE_EXCEPTION(TimeoutError, OSError)
+MP_DEFINE_EXCEPTION(FileExistsError, OSError)
+MP_DEFINE_EXCEPTION(FileNotFoundError, OSError)
+MP_DEFINE_EXCEPTION(ReferenceError, Exception)
+MP_DEFINE_EXCEPTION(RecursionError, RuntimeError)
+MP_DEFINE_EXCEPTION(TabError, IndentationError)
+MP_DEFINE_EXCEPTION(SystemError, Exception)
+#if MICROPY_PY_BUILTINS_STR_UNICODE
+MP_DEFINE_EXCEPTION(UnicodeEncodeError, UnicodeError)
+#endif
+#if MICROPY_PY_BUILTINS_STR_UNICODE
+MP_DEFINE_EXCEPTION(UnicodeDecodeError, UnicodeError)
+#endif
+#if MICROPY_PY_BUILTINS_STR_UNICODE
+MP_DEFINE_EXCEPTION(UnicodeTranslateError, UnicodeError)
+#endif
+MP_DEFINE_EXCEPTION(Warning, Exception)
+MP_DEFINE_EXCEPTION(DeprecationWarning, Warning)
+MP_DEFINE_EXCEPTION(PendingDeprecationWarning, Warning)
+MP_DEFINE_EXCEPTION(RuntimeWarning, Warning)
+MP_DEFINE_EXCEPTION(SyntaxWarning, Warning)
+MP_DEFINE_EXCEPTION(UserWarning, Warning)
+MP_DEFINE_EXCEPTION(FutureWarning, Warning)
+MP_DEFINE_EXCEPTION(ImportWarning, Warning)
+MP_DEFINE_EXCEPTION(UnicodeWarning, Warning)
+MP_DEFINE_EXCEPTION(BytesWarning, Warning)
+MP_DEFINE_EXCEPTION(ResourceWarning, Warning)
+MP_DEFINE_EXCEPTION(EncodingWarning, Warning)
 
-// *FORMAT-ON*
 
 mp_obj_t mp_obj_new_exception(const mp_obj_type_t *exc_type) {
     assert(MP_OBJ_TYPE_GET_SLOT_OR_NULL(exc_type, make_new) == mp_obj_exception_make_new);

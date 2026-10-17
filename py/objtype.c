@@ -174,7 +174,14 @@ static void mp_obj_class_lookup(struct class_lookup_data *lookup, const mp_obj_t
                         obj_obj = obj->subobj[0];
                         #if MICROPY_BUILTIN_METHOD_CHECK_SELF_ARG
                         if (obj_obj == MP_OBJ_FROM_PTR(&mp_native_base_init_wrapper_obj)) {
-                            // But we shouldn't attempt lookups on object that is not yet instantiated.
+                            // The native instance has not been constructed yet. Its
+                            // __init__ must be allowed to initialise it before
+                            // inherited methods and attributes are accessed.
+                            if (lookup->attr == MP_QSTR___init__) {
+                                lookup->dest[0] = MP_OBJ_FROM_PTR(&mp_native_base_init_wrapper_obj);
+                                lookup->dest[1] = MP_OBJ_FROM_PTR(obj);
+                                return;
+                            }
                             mp_raise_msg(&mp_type_AttributeError, MP_ERROR_TEXT("call super().__init__() first"));
                         }
                         #endif // MICROPY_BUILTIN_METHOD_CHECK_SELF_ARG

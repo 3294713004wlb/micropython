@@ -2235,6 +2235,108 @@ void mp_obj_str_set_data(mp_obj_str_t *str, const byte *data, size_t len) {
     str->hash = qstr_compute_hash(data, len);
 }
 
+// Python 3.10 string/bytes convenience methods shared by the immutable
+// string and byte-string types. These operate in character widths for Unicode.
+static mp_obj_t str_isascii(mp_obj_t self_in) {
+    GET_STR_DATA_LEN(self_in, data, length);
+    for (size_t i = 0; i < length; ++i) {
+        if (data[i] & 0x80) {
+            return mp_const_false;
+        }
+    }
+    return mp_const_true;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(str_isascii_obj, str_isascii);
+
+static mp_obj_t str_justify(size_t n_args, const mp_obj_t *args, bool left) {
+    mp_obj_t self = args[0];
+    GET_STR_DATA_LEN(self, original, original_len);
+    const mp_obj_type_t *type = mp_obj_get_type(self);
+    mp_int_t requested_width = mp_obj_get_int(args[1]);
+    size_t num_chars = original_len;
+    #if MICROPY_PY_BUILTINS_STR_UNICODE
+    if (type == &mp_type_str) {
+        num_chars = utf8_charlen(original, original_len);
+    }
+    #endif
+    if (requested_width <= 0 || (size_t)requested_width <= num_chars) {
+        return self;
+    }
+
+    const byte *fill_data = (const byte *)" ";
+    size_t fill_len = 1;
+    if (n_args == 3) {
+        str_check_arg_type(type, args[2]);
+        GET_STR_DATA_LEN(args[2], filler, filler_len);
+        size_t fill_chars = filler_len;
+        #if MICROPY_PY_BUILTINS_STR_UNICODE
+        if (type == &mp_type_str) {
+            fill_chars = utf8_charlen(filler, filler_len);
+        }
+        #endif
+        if (fill_chars != 1) {
+            mp_raise_TypeError(MP_ERROR_TEXT("fill character must be exactly one character long"));
+        }
+        fill_data = filler;
+        fill_len = filler_len;
+    }
+
+    size_t padding = (size_t)requested_width - num_chars;
+    if (padding > (SIZE_MAX - original_len) / fill_len) {
+        mp_raise_msg(&mp_type_OverflowError, MP_ERROR_TEXT("string width too large"));
+    }
+    vstr_t result;
+    vstr_init_len(&result, original_len + padding * fill_len);
+    byte *dst = (byte *)result.buf;
+    if (!left) {
+        for (size_t i = 0; i < padding; ++i) {
+            memcpy(dst + i * fill_len, fill_data, fill_len);
+        }
+        dst += padding * fill_len;
+    }
+    memcpy(dst, original, original_len);
+    if (left) {
+        dst += original_len;
+        for (size_t i = 0; i < padding; ++i) {
+            memcpy(dst + i * fill_len, fill_data, fill_len);
+        }
+    }
+    return mp_obj_new_str_type_from_vstr(type, &result);
+}
+
+static mp_obj_t str_ljust(size_t n_args, const mp_obj_t *args) {
+    return str_justify(n_args, args, true);
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(str_ljust_obj, 2, 3, str_ljust);
+
+static mp_obj_t str_rjust(size_t n_args, const mp_obj_t *args) {
+    return str_justify(n_args, args, false);
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(str_rjust_obj, 2, 3, str_rjust);
+
+static mp_obj_t str_remove_affix(mp_obj_t self, mp_obj_t affix, bool prefix) {
+    const mp_obj_type_t *type = mp_obj_get_type(self);
+    str_check_arg_type(type, affix);
+    GET_STR_DATA_LEN(self, data, length);
+    GET_STR_DATA_LEN(affix, match, match_len);
+    if (match_len > length || (match_len != 0 &&
+        memcmp(prefix ? data : data + length - match_len, match, match_len) != 0)) {
+        return self;
+    }
+    return mp_obj_new_str_of_type(type,
+        prefix ? data + match_len : data, length - match_len);
+}
+
+static mp_obj_t str_removeprefix(mp_obj_t self, mp_obj_t prefix) {
+    return str_remove_affix(self, prefix, true);
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(str_removeprefix_obj, str_removeprefix);
+
+static mp_obj_t str_removesuffix(mp_obj_t self, mp_obj_t suffix) {
+    return str_remove_affix(self, suffix, false);
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(str_removesuffix_obj, str_removesuffix);
+
 // This locals table is used for the following types: str, bytes, bytearray, array.array.
 // Each type takes a different section (start to end offset) of this table.
 static const mp_rom_map_elem_t array_bytearray_str_bytes_locals_table[] = {
@@ -2264,6 +2366,11 @@ static const mp_rom_map_elem_t array_bytearray_str_bytes_locals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_strip), MP_ROM_PTR(&str_strip_obj) },
     { MP_ROM_QSTR(MP_QSTR_lstrip), MP_ROM_PTR(&str_lstrip_obj) },
     { MP_ROM_QSTR(MP_QSTR_rstrip), MP_ROM_PTR(&str_rstrip_obj) },
+    { MP_ROM_QSTR(MP_QSTR_ljust), MP_ROM_PTR(&str_ljust_obj) },
+    { MP_ROM_QSTR(MP_QSTR_rjust), MP_ROM_PTR(&str_rjust_obj) },
+    { MP_ROM_QSTR(MP_QSTR_removeprefix), MP_ROM_PTR(&str_removeprefix_obj) },
+    { MP_ROM_QSTR(MP_QSTR_removesuffix), MP_ROM_PTR(&str_removesuffix_obj) },
+    { MP_ROM_QSTR(MP_QSTR_isascii), MP_ROM_PTR(&str_isascii_obj) },
     { MP_ROM_QSTR(MP_QSTR_format), MP_ROM_PTR(&str_format_obj) },
     { MP_ROM_QSTR(MP_QSTR_replace), MP_ROM_PTR(&str_replace_obj) },
     #if MICROPY_PY_BUILTINS_STR_COUNT

@@ -320,6 +320,35 @@ static bool get_hex(mp_lexer_t *lex, size_t num_digits, mp_uint_t *result) {
     return true;
 }
 
+#if MICROPY_PY_FSTRINGS
+// Adjacent ordinary literals and f-strings are joined by the lexer before
+// f-strings are lowered into str.format() calls.  Braces from ordinary string
+// literals must be escaped or they become unintended replacement fields.
+// Rewrite backwards after one allocation, avoiding quadratic copies.
+static void escape_literal_braces_for_fstring(vstr_t *vstr, size_t start) {
+    size_t extra = 0;
+    for (size_t i = start; i < vstr->len; ++i) {
+        if (vstr->buf[i] == '{' || vstr->buf[i] == '}') {
+            ++extra;
+        }
+    }
+    if (extra == 0) {
+        return;
+    }
+
+    size_t old_len = vstr->len;
+    vstr_add_len(vstr, extra);
+    size_t dst = vstr->len;
+    for (size_t src = old_len; src > start;) {
+        char ch = vstr->buf[--src];
+        vstr->buf[--dst] = ch;
+        if (ch == '{' || ch == '}') {
+            vstr->buf[--dst] = ch;
+        }
+    }
+}
+#endif
+
 static void parse_string_literal(mp_lexer_t *lex, bool is_raw, bool is_fstring, bool is_tstring) {
     // get first quoting character
     char quote_char = '\'';
@@ -864,8 +893,24 @@ void mp_lexer_to_next(mp_lexer_t *lex) {
                 }
             }
 
-            // Parse the literal
+            // Only the f-string portions may contain replacement fields in
+            // the injected .format() call. Escape ordinary adjacent braces.
+            #if MICROPY_PY_FSTRINGS
+            if (is_fstring && vstr_len(&lex->fstring_args) == 0) {
+                // Plain literals before the first f-string.
+                escape_literal_braces_for_fstring(&lex->vstr, 0);
+            }
+            size_t literal_start = lex->vstr.len;
+            #endif
+
             parse_string_literal(lex, is_raw, is_fstring, is_tstring);
+
+            #if MICROPY_PY_FSTRINGS
+            if (!is_fstring && vstr_len(&lex->fstring_args) != 0) {
+                // Plain literals after an f-string.
+                escape_literal_braces_for_fstring(&lex->vstr, literal_start);
+            }
+            #endif
 
             // Skip whitespace so we can check if there's another string following
             skip_whitespace(lex, true);

@@ -1084,7 +1084,9 @@ static mp_obj_t checked_fun_call(mp_obj_t self_in, size_t n_args, size_t n_kw, c
     mp_obj_checked_fun_t *self = MP_OBJ_TO_PTR(self_in);
     if (n_args > 0) {
         const mp_obj_type_t *arg0_type = mp_obj_get_type(args[0]);
-        if (arg0_type != self->type) {
+        // CPython permits calling a native base method on a Python subclass.
+        // Reject unrelated receivers, but do not demand identical types.
+        if (!mp_obj_is_subclass_fast(MP_OBJ_FROM_PTR(arg0_type), MP_OBJ_FROM_PTR(self->type))) {
             #if MICROPY_ERROR_REPORTING != MICROPY_ERROR_REPORTING_DETAILED
             mp_raise_TypeError(MP_ERROR_TEXT("argument has wrong type"));
             #else
@@ -1773,12 +1775,15 @@ MP_NORETURN void mp_raise_OSError(int errno_) {
 }
 
 MP_NORETURN void mp_raise_OSError_with_filename(int errno_, const char *filename) {
-    vstr_t vstr;
-    vstr_init(&vstr, 32);
-    vstr_printf(&vstr, "can't open %s", filename);
-    mp_obj_t o_str = mp_obj_new_str_from_vstr(&vstr);
-    mp_obj_t args[2] = { MP_OBJ_NEW_SMALL_INT(errno_), MP_OBJ_FROM_PTR(o_str)};
-    nlr_raise(mp_obj_exception_make_new(&mp_type_OSError, 2, 0, args));
+    // Preserve the path as a separate attribute for CPython-compatible
+    // OSError subclasses such as FileNotFoundError and PermissionError.
+    const char *message = strerror(errno_);
+    mp_obj_t args[3] = {
+        MP_OBJ_NEW_SMALL_INT(errno_),
+        mp_obj_new_str(message, strlen(message)),
+        mp_obj_new_str(filename, strlen(filename)),
+    };
+    nlr_raise(mp_obj_exception_make_new(&mp_type_OSError, 3, 0, args));
 }
 
 #if MICROPY_STACK_CHECK

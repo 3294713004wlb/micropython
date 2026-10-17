@@ -1,0 +1,203 @@
+{
+  "name": "MicroPython Browser Native Shared Transport",
+  "version": 5,
+  "mailboxMagic": 1296193589,
+  "endianness": "little",
+  "regionAlignment": 4,
+  "regions": [
+    {
+      "id": 0,
+      "name": "serial_rx",
+      "bytes": 262160
+    },
+    {
+      "id": 1,
+      "name": "serial_tx",
+      "bytes": 262160
+    },
+    {
+      "id": 2,
+      "name": "usb_tx",
+      "bytes": 1048576
+    },
+    {
+      "id": 3,
+      "name": "usb_rx",
+      "bytes": 1048576
+    },
+    {
+      "id": 4,
+      "name": "hid_tx",
+      "bytes": 65536
+    },
+    {
+      "id": 5,
+      "name": "hid_rx",
+      "bytes": 65536
+    },
+    {
+      "id": 6,
+      "name": "usb_state",
+      "bytes": 64
+    },
+    {
+      "id": 7,
+      "name": "hid_state",
+      "bytes": 64
+    },
+    {
+      "id": 8,
+      "name": "usb_error",
+      "bytes": 4096
+    },
+    {
+      "id": 9,
+      "name": "hid_error",
+      "bytes": 4096
+    },
+    {
+      "id": 10,
+      "name": "hid_id",
+      "bytes": 512
+    },
+    {
+      "id": 11,
+      "name": "cancel",
+      "bytes": 4
+    },
+    {
+      "id": 12,
+      "name": "terminal_output",
+      "bytes": 1048592
+    }
+  ],
+  "ring": {
+    "read": 0,
+    "write": 1,
+    "reserved0": 2,
+    "reserved1": 3,
+    "headerBytes": 16,
+    "serialCapacity": 262144
+  },
+  "terminal": {
+    "read": 0,
+    "write": 1,
+    "reserved": 2,
+    "closed": 3,
+    "headerWords": 4,
+    "capacityWords": 262144,
+    "stdout": 1,
+    "stderr": 2,
+    "byteMask": 255,
+    "streamShift": 8
+  },
+  "mailbox": {
+    "words": 16,
+    "fields": {
+      "status": 0,
+      "sequence": 1,
+      "opcode": 2,
+      "paramA": 3,
+      "paramB": 4,
+      "txLength": 5,
+      "rxLength": 6,
+      "timeoutMs": 7,
+      "resultLength": 8,
+      "errorLength": 9,
+      "bmRequestType": 10,
+      "bRequest": 11,
+      "wValue": 12,
+      "wIndex": 13,
+      "magic": 14,
+      "version": 15
+    },
+    "states": {
+      "idle": 0,
+      "pending": 1,
+      "done": 2,
+      "committing": 3,
+      "error": -2
+    }
+  },
+  "opcodes": {
+    "usb": {
+      "out": 1,
+      "in": 2,
+      "outIn": 3,
+      "controlOut": 4,
+      "controlIn": 5
+    },
+    "hid": {
+      "write": 1,
+      "read": 2,
+      "output": 3,
+      "featureWrite": 4,
+      "featureRead": 5
+    }
+  },
+  "channelSemantics": {
+    "serial": "SPSC bytes; producer release-publishes write, consumer release-publishes read; one empty slot distinguishes full",
+    "terminal": "SPSC int32 stream-tagged bytes; one empty slot; stream 1 stdout, stream 2 stderr",
+    "usb": "single-flight packet mailbox with atomic state transitions and generation fencing",
+    "hid": "single-flight report mailbox with atomic state transitions and generation fencing",
+    "cancel": "atomic 32-bit interrupt flag"
+  },
+  "memoryModel": {
+    "byteOrder": "little",
+    "publish": "release",
+    "observe": "acquire",
+    "noAtomicsWaitInVm": true
+  },
+  "auxiliary": {
+    "serialControl": {
+      "setDtr": 1,
+      "setRts": 2,
+      "setBaud": 3,
+      "setBreak": 4,
+      "setDtrRts": 5,
+      "setParity": 6,
+      "setDataBits": 7,
+      "setStopBits": 8
+    },
+    "serialState": {
+      "baud": 1,
+      "dtr": 4,
+      "rts": 5,
+      "closed": 11,
+      "abort": 12,
+      "parity": 13,
+      "dataBits": 14,
+      "stopBits": 15
+    },
+    "stdinState": {
+      "cancel": 0,
+      "columns": 2,
+      "rows": 3,
+      "mode": 4,
+      "inputRequested": 5,
+      "generation": 6
+    },
+    "terminalMode": {
+      "normal": 0,
+      "raw": 1,
+      "cbreak": 2
+    },
+    "deviceRpcField": {
+      "status": 0,
+      "sequence": 1,
+      "responseLength": 2,
+      "requestLength": 3
+    },
+    "deviceRpcStatus": {
+      "aborted": -1,
+      "idle": 0,
+      "pending": 1,
+      "done": 2,
+      "claiming": 3
+    }
+  },
+  "protocolKinds": {
+    "usb": 1,
+    "hid": 2
+  }
+}

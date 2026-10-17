@@ -442,6 +442,9 @@ static mp_obj_t int_to_bytes(size_t n_args, const mp_obj_t *pos_args, mp_map_t *
     mp_arg_parse_all(n_args - 1, pos_args + 1, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
 
     mp_obj_t self = pos_args[0];
+    if (self == mp_const_false || self == mp_const_true) {
+        self = MP_OBJ_NEW_SMALL_INT(self == mp_const_true ? 1 : 0);
+    }
 
     mp_int_t dlen = args[ARG_length].u_int;
     if (dlen < 0) {
@@ -459,7 +462,7 @@ static mp_obj_t int_to_bytes(size_t n_args, const mp_obj_t *pos_args, mp_map_t *
 
     return mp_obj_new_bytes_from_vstr(&vstr);
 }
-static MP_DEFINE_CONST_FUN_OBJ_KW(int_to_bytes_obj, 1, int_to_bytes);
+MP_DEFINE_CONST_FUN_OBJ_KW(int_to_bytes_obj, 1, int_to_bytes);
 
 static const mp_rom_map_elem_t int_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_from_bytes), MP_ROM_PTR(&int_from_bytes_obj) },

@@ -26,6 +26,11 @@ ifeq ($(JLINK_NATIVE),1)
 override USER_C_MODULES += $(CURDIR)/usermods
 endif
 
+# Native CLI transports data synchronously through shared WASM memory.
+# Asyncify is needed only to snapshot VM locals for a safe synchronous GC.
+WASM_NATIVE_CLI_PROFILE ?= 1
+WASM_GC_REGISTER_SCAN_ASYNCIFY ?= 1
+
 include ../../py/mkenv.mk
 include $(VARIANT_DIR)/mpconfigvariant.mk
 
@@ -62,9 +67,72 @@ CFLAGS += -std=c99 -Wall -Werror -Wdouble-promotion -Wfloat-conversion
 CFLAGS += -Os -DNDEBUG
 CFLAGS += $(INC)
 
+# Native synchronous CLI: keep the VM on its Worker while device operations
+# proceed independently through shared WASM memory. For browser asyncio apps,
+# build with WASM_NATIVE_CLI_PROFILE=0 to opt back into cooperative yields.
+WASM_NATIVE_CLI_PROFILE ?= 1
+# Native Wasm SjLj avoids JS invoke_*/setThrew handlers during CLI imports.
+# Use one consistent setjmp/longjmp mechanism for compilation and linking.
+ifeq ($(WASM_NATIVE_CLI_PROFILE),1)
+CFLAGS += -sSUPPORT_LONGJMP=wasm
+JSFLAGS += -sSUPPORT_LONGJMP=wasm
+else
+CFLAGS += -sSUPPORT_LONGJMP=emscripten
+JSFLAGS += -sSUPPORT_LONGJMP=emscripten
+endif
+
+# Diagnose unbalanced MicroPython NLR frames before they damage wasm memory.
+WASM_NLR_GUARD ?= 1
+CFLAGS += -DMICROPY_WASM_NLR_GUARD=$(WASM_NLR_GUARD)
+
+ifeq ($(WASM_NATIVE_CLI_PROFILE),1)
+CFLAGS += -DMICROPY_WASM_VM_AUTO_YIELD=0
+CFLAGS += -DMICROPY_WASM_CLI_BUSY_DELAY=1
+else
+CFLAGS += -DMICROPY_WASM_VM_AUTO_YIELD=1
+CFLAGS += -DMICROPY_WASM_CLI_BUSY_DELAY=0
+endif
+
+# Produce a function-index to function-name symbol map for matching the
+# browser stack: wasm-function[521], wasm-function[539], etc.
+# Keep this optional because symbols are not useful in production bundles.
+WASM_DEBUG_SYMBOLS ?= 0
+ifeq ($(WASM_DEBUG_SYMBOLS),1)
+CFLAGS += -g3
+JSFLAGS += --emit-symbol-map
+endif
+
+# Opt-in diagnostics for locating stack/null-pointer corruption.
+WASM_DEBUG_MEMORY ?= 0
+ifeq ($(WASM_DEBUG_MEMORY),1)
+CFLAGS += -g3
+JSFLAGS += -s STACK_OVERFLOW_CHECK=2
+JSFLAGS += -s ASSERTIONS=2
+JSFLAGS += -s SAFE_HEAP=1
+endif
+
+# Optional C-level null pointer diagnostics; do not enable in production
+# Both compile and link stages need the UBSan runtime
+WASM_DEBUG_NULL ?= 0
+ifeq ($(WASM_DEBUG_NULL),1)
+CFLAGS += -fsanitize=null -fno-sanitize-recover=null
+LDFLAGS += -fsanitize=null
+endif
+
+# WASM native shared transport: C and JS operate the same linear memory.
+CFLAGS += -matomics -mbulk-memory
+
+# Enable Emscripten's zlib port at compilation and link time. This powers
+# Python's zlib.compress() without browser-side firmware preprocessing.
+CFLAGS += -sUSE_ZLIB=1
+JSFLAGS += -sUSE_ZLIB=1
+
 EXPORTED_FUNCTIONS_EXTRA += ,\
 	_mp_js_do_exec,\
 	_mp_js_do_exec_async,\
+	_mp_js_get_main_dict,\
+	_mp_js_native_cli_profile,\
+	_mp_js_gc_register_scan_asyncify,\
 	_mp_js_do_import,\
 	_mp_js_register_js_module,\
 	_mp_js_repl_init,\
@@ -99,13 +167,16 @@ JSFLAGS += -s EXPORTED_FUNCTIONS="\
 	_malloc,\
 	_mp_js_init,\
 	_mp_hal_get_interrupt_char,\
-	_mp_sched_keyboard_interrupt$(EXPORTED_FUNCTIONS_EXTRA)"
+	_mp_sched_keyboard_interrupt,\
+	_wasm_transport_region,\
+	_wasm_transport_region_size,\
+	_wasm_transport_region_count,\
+	_wasm_transport_protocol_hash32$(EXPORTED_FUNCTIONS_EXTRA)"
 JSFLAGS += -s EXPORTED_RUNTIME_METHODS="\
 	ccall,\
 	cwrap,\
 	FS$(EXPORTED_RUNTIME_METHODS_EXTRA)"
 JSFLAGS += --js-library library.js
-JSFLAGS += -s SUPPORT_LONGJMP=emscripten
 JSFLAGS += -s MODULARIZE -s EXPORT_NAME=_createMicroPythonModule
 # Browser main thread and dedicated Web Worker only; exclude Node.js / shell shims.
 JSFLAGS += -s ENVIRONMENT=web,worker
@@ -117,6 +188,8 @@ WASM_INITIAL_MEMORY ?= 67108864
 WASM_MAXIMUM_MEMORY ?= 2147483648
 WASM_STACK_SIZE ?= 131072
 WASM_MEMORY_GROWTH_STEP ?= 0.2
+JSFLAGS += -s SHARED_MEMORY=1
+JSFLAGS += -s IMPORTED_MEMORY=1
 JSFLAGS += -s ALLOW_MEMORY_GROWTH=1
 JSFLAGS += -s INITIAL_MEMORY=$(WASM_INITIAL_MEMORY)
 JSFLAGS += -s MAXIMUM_MEMORY=$(WASM_MAXIMUM_MEMORY)
@@ -135,6 +208,14 @@ SRC_SHARED = $(addprefix shared/,\
 	)
 
 SRC_C += \
+	modzlib_native.c \
+	modhashlib_native.c \
+	md5_core.c \
+	transport/transport_runtime.c \
+	transport/transport_terminal.c \
+	transport/transport_serial.c \
+	transport/transport_mailbox.c \
+	transport/transport_regions.c \
 	modwasm_transport.c \
 	fatfs_port.c \
 	lexer_dedent.c \

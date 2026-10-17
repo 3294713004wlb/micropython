@@ -246,6 +246,14 @@ void proxy_convert_mp_to_js_exc_cside(void *exc, uint32_t *out) {
     vstr_add_char(&vstr, '\x04');
     mp_obj_print_exception(&print, MP_OBJ_FROM_PTR(exc));
     char *s = malloc(vstr_len(&vstr) + 1);
+    if (s == NULL) {
+        // malloc(NULL) must not become a memcpy to address zero, which
+        // overwrites the Emscripten low-memory stack cookie at address 4.
+        out[1] = 0;
+        out[2] = 0;
+        vstr_clear(&vstr);
+        return;
+    }
     memcpy(s, vstr_str(&vstr), vstr_len(&vstr));
     out[1] = vstr_len(&vstr);
     out[2] = (uintptr_t)s;

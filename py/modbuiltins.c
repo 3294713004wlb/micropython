@@ -385,13 +385,21 @@ static mp_obj_t mp_builtin_pow(size_t n_args, const mp_obj_t *args) {
 MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mp_builtin_pow_obj, 2, 3, mp_builtin_pow);
 
 static mp_obj_t mp_builtin_print(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
-    enum { ARG_sep, ARG_end, ARG_file };
+    enum {
+        ARG_sep,
+        ARG_end,
+        #if MICROPY_PY_IO && MICROPY_PY_SYS_STDFILES
+        ARG_file,
+        #endif
+        ARG_flush,
+    };
     static const mp_arg_t allowed_args[] = {
         { MP_QSTR_sep, MP_ARG_KW_ONLY | MP_ARG_OBJ, {.u_rom_obj = MP_ROM_QSTR(MP_QSTR__space_)} },
         { MP_QSTR_end, MP_ARG_KW_ONLY | MP_ARG_OBJ, {.u_rom_obj = MP_ROM_QSTR(MP_QSTR__0x0a_)} },
         #if MICROPY_PY_IO && MICROPY_PY_SYS_STDFILES
         { MP_QSTR_file, MP_ARG_KW_ONLY | MP_ARG_OBJ, {.u_rom_obj = MP_ROM_PTR(&mp_sys_stdout_obj)} },
         #endif
+        { MP_QSTR_flush, MP_ARG_KW_ONLY | MP_ARG_BOOL, { .u_bool = false } },
     };
 
     // parse args (a union is used to reduce the amount of C stack that is needed)
@@ -402,11 +410,18 @@ static mp_obj_t mp_builtin_print(size_t n_args, const mp_obj_t *pos_args, mp_map
     mp_arg_parse_all(0, NULL, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, u.args);
 
     #if MICROPY_PY_IO && MICROPY_PY_SYS_STDFILES
-    mp_get_stream_raise(u.args[ARG_file].u_obj, MP_STREAM_OP_WRITE);
-    mp_print_t print = {MP_OBJ_TO_PTR(u.args[ARG_file].u_obj), mp_stream_write_adaptor};
+    // CPython treats file=None as sys.stdout. Keep the destination rooted
+    // while print arguments may allocate objects or trigger a GC cycle.
+    mp_obj_t print_file = u.args[ARG_file].u_obj;
+    if (print_file == mp_const_none) {
+        print_file = MP_OBJ_FROM_PTR(&mp_sys_stdout_obj);
+    }
+    mp_get_stream_raise(print_file, MP_STREAM_OP_WRITE);
+    mp_print_t print = {MP_OBJ_TO_PTR(print_file), mp_stream_write_adaptor};
     #endif
 
-    // extract the objects first because we are going to use the other part of the union
+    // Extract keyword values before reusing the union for string lengths.
+    bool flush = u.args[ARG_flush].u_bool;
     mp_obj_t sep = u.args[ARG_sep].u_obj;
     mp_obj_t end = u.args[ARG_end].u_obj;
     const char *sep_data = mp_obj_str_get_data(sep, &u.len[0]);
@@ -430,6 +445,16 @@ static mp_obj_t mp_builtin_print(size_t n_args, const mp_obj_t *pos_args, mp_map
     mp_stream_write_adaptor(print.data, end_data, u.len[1]);
     #else
     mp_print_strn(&mp_plat_print, end_data, u.len[1], 0, 0, 0);
+    #endif
+    #if MICROPY_PY_IO && MICROPY_PY_SYS_STDFILES
+    if (flush) {
+        // Call the stream's own flush() so custom Python streams work too.
+        mp_obj_t method[2];
+        mp_load_method(print_file, MP_QSTR_flush, method);
+        mp_call_method_n_kw(0, 0, method);
+    }
+    #else
+    (void)flush;
     #endif
     return mp_const_none;
 }
@@ -753,6 +778,8 @@ static const mp_rom_map_elem_t mp_module_builtins_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_NameError), MP_ROM_PTR(&mp_type_NameError) },
     { MP_ROM_QSTR(MP_QSTR_NotImplementedError), MP_ROM_PTR(&mp_type_NotImplementedError) },
     { MP_ROM_QSTR(MP_QSTR_OSError), MP_ROM_PTR(&mp_type_OSError) },
+    { MP_ROM_QSTR(MP_QSTR_IOError), MP_ROM_PTR(&mp_type_OSError) },
+    { MP_ROM_QSTR(MP_QSTR_EnvironmentError), MP_ROM_PTR(&mp_type_OSError) },
     { MP_ROM_QSTR(MP_QSTR_OverflowError), MP_ROM_PTR(&mp_type_OverflowError) },
     { MP_ROM_QSTR(MP_QSTR_RuntimeError), MP_ROM_PTR(&mp_type_RuntimeError) },
     #if MICROPY_PY_ASYNC_AWAIT
@@ -770,6 +797,51 @@ static const mp_rom_map_elem_t mp_module_builtins_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_ViperTypeError), MP_ROM_PTR(&mp_type_ViperTypeError) },
     #endif
     { MP_ROM_QSTR(MP_QSTR_ZeroDivisionError), MP_ROM_PTR(&mp_type_ZeroDivisionError) },
+    { MP_ROM_QSTR(MP_QSTR_FloatingPointError), MP_ROM_PTR(&mp_type_FloatingPointError) },
+    { MP_ROM_QSTR(MP_QSTR_BufferError), MP_ROM_PTR(&mp_type_BufferError) },
+    { MP_ROM_QSTR(MP_QSTR_ModuleNotFoundError), MP_ROM_PTR(&mp_type_ModuleNotFoundError) },
+    { MP_ROM_QSTR(MP_QSTR_UnboundLocalError), MP_ROM_PTR(&mp_type_UnboundLocalError) },
+    { MP_ROM_QSTR(MP_QSTR_BlockingIOError), MP_ROM_PTR(&mp_type_BlockingIOError) },
+    { MP_ROM_QSTR(MP_QSTR_ChildProcessError), MP_ROM_PTR(&mp_type_ChildProcessError) },
+    { MP_ROM_QSTR(MP_QSTR_ConnectionError), MP_ROM_PTR(&mp_type_ConnectionError) },
+    { MP_ROM_QSTR(MP_QSTR_BrokenPipeError), MP_ROM_PTR(&mp_type_BrokenPipeError) },
+    { MP_ROM_QSTR(MP_QSTR_ConnectionAbortedError), MP_ROM_PTR(&mp_type_ConnectionAbortedError) },
+    { MP_ROM_QSTR(MP_QSTR_ConnectionRefusedError), MP_ROM_PTR(&mp_type_ConnectionRefusedError) },
+    { MP_ROM_QSTR(MP_QSTR_ConnectionResetError), MP_ROM_PTR(&mp_type_ConnectionResetError) },
+    { MP_ROM_QSTR(MP_QSTR_InterruptedError), MP_ROM_PTR(&mp_type_InterruptedError) },
+    { MP_ROM_QSTR(MP_QSTR_IsADirectoryError), MP_ROM_PTR(&mp_type_IsADirectoryError) },
+    { MP_ROM_QSTR(MP_QSTR_NotADirectoryError), MP_ROM_PTR(&mp_type_NotADirectoryError) },
+    { MP_ROM_QSTR(MP_QSTR_PermissionError), MP_ROM_PTR(&mp_type_PermissionError) },
+    { MP_ROM_QSTR(MP_QSTR_ProcessLookupError), MP_ROM_PTR(&mp_type_ProcessLookupError) },
+    { MP_ROM_QSTR(MP_QSTR_TimeoutError), MP_ROM_PTR(&mp_type_TimeoutError) },
+    { MP_ROM_QSTR(MP_QSTR_FileExistsError), MP_ROM_PTR(&mp_type_FileExistsError) },
+    { MP_ROM_QSTR(MP_QSTR_FileNotFoundError), MP_ROM_PTR(&mp_type_FileNotFoundError) },
+    { MP_ROM_QSTR(MP_QSTR_ReferenceError), MP_ROM_PTR(&mp_type_ReferenceError) },
+    { MP_ROM_QSTR(MP_QSTR_RecursionError), MP_ROM_PTR(&mp_type_RecursionError) },
+    { MP_ROM_QSTR(MP_QSTR_TabError), MP_ROM_PTR(&mp_type_TabError) },
+    { MP_ROM_QSTR(MP_QSTR_SystemError), MP_ROM_PTR(&mp_type_SystemError) },
+    #if MICROPY_PY_BUILTINS_STR_UNICODE
+    { MP_ROM_QSTR(MP_QSTR_UnicodeEncodeError), MP_ROM_PTR(&mp_type_UnicodeEncodeError) },
+    #endif
+    #if MICROPY_PY_BUILTINS_STR_UNICODE
+    { MP_ROM_QSTR(MP_QSTR_UnicodeDecodeError), MP_ROM_PTR(&mp_type_UnicodeDecodeError) },
+    #endif
+    #if MICROPY_PY_BUILTINS_STR_UNICODE
+    { MP_ROM_QSTR(MP_QSTR_UnicodeTranslateError), MP_ROM_PTR(&mp_type_UnicodeTranslateError) },
+    #endif
+    { MP_ROM_QSTR(MP_QSTR_Warning), MP_ROM_PTR(&mp_type_Warning) },
+    { MP_ROM_QSTR(MP_QSTR_DeprecationWarning), MP_ROM_PTR(&mp_type_DeprecationWarning) },
+    { MP_ROM_QSTR(MP_QSTR_PendingDeprecationWarning), MP_ROM_PTR(&mp_type_PendingDeprecationWarning) },
+    { MP_ROM_QSTR(MP_QSTR_RuntimeWarning), MP_ROM_PTR(&mp_type_RuntimeWarning) },
+    { MP_ROM_QSTR(MP_QSTR_SyntaxWarning), MP_ROM_PTR(&mp_type_SyntaxWarning) },
+    { MP_ROM_QSTR(MP_QSTR_UserWarning), MP_ROM_PTR(&mp_type_UserWarning) },
+    { MP_ROM_QSTR(MP_QSTR_FutureWarning), MP_ROM_PTR(&mp_type_FutureWarning) },
+    { MP_ROM_QSTR(MP_QSTR_ImportWarning), MP_ROM_PTR(&mp_type_ImportWarning) },
+    { MP_ROM_QSTR(MP_QSTR_UnicodeWarning), MP_ROM_PTR(&mp_type_UnicodeWarning) },
+    { MP_ROM_QSTR(MP_QSTR_BytesWarning), MP_ROM_PTR(&mp_type_BytesWarning) },
+    { MP_ROM_QSTR(MP_QSTR_ResourceWarning), MP_ROM_PTR(&mp_type_ResourceWarning) },
+    { MP_ROM_QSTR(MP_QSTR_EncodingWarning), MP_ROM_PTR(&mp_type_EncodingWarning) },
+
 
     // Extra builtins as defined by a port
     MICROPY_PORT_BUILTINS

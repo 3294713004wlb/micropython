@@ -27,6 +27,26 @@
 // Number of static entries at the start of proxy_js_ref.
 const PROXY_JS_REF_NUM_STATIC = 2;
 
+/**
+ * Allocate conversion scratch memory without allowing a null pointer to
+ * become a legitimate result buffer in the JS/Python object-proxy bridge
+ *
+ * In a WASM linear memory, writing to a null pointer does not necessarily
+ * trap immediately and can overwrite Emscripten's cookie at address 4
+ *
+ * @param {number} size Allocation size in bytes
+ * @returns {number} Valid nonzero WASM pointer
+ */
+function proxy_malloc_or_throw(size) {
+    const address = Module._malloc(size);
+    if (!Number.isInteger(address) || address === 0) {
+        throw new RangeError(
+            `Out of WASM memory allocating ${size} bytes for Python/JS proxy`
+        );
+    }
+    return address;
+}
+
 // These constants should match the constants in proxy_c.c.
 
 const PROXY_KIND_MP_EXCEPTION = -1;
@@ -135,7 +155,7 @@ function proxy_call_python(target, argumentsList) {
 
     if (argumentsList.length > 0) {
         // TODO use stackAlloc/stackRestore?
-        args = Module._malloc(argumentsList.length * 3 * 4);
+        args = proxy_malloc_or_throw(argumentsList.length * 3 * 4);
         for (const i in argumentsList) {
             proxy_convert_js_to_mp_obj_jsside(
                 argumentsList[i],
@@ -143,7 +163,7 @@ function proxy_call_python(target, argumentsList) {
             );
         }
     }
-    const value = Module._malloc(3 * 4);
+    const value = proxy_malloc_or_throw(3 * 4);
     Module.ccall(
         "proxy_c_to_js_call",
         "null",
@@ -197,7 +217,7 @@ function proxy_convert_js_to_mp_obj_jsside_helper(js_obj, out, allow_pyproxy) {
     } else if (typeof js_obj === "string") {
         kind = PROXY_KIND_JS_STRING;
         const len = Module.lengthBytesUTF8(js_obj);
-        const buf = Module._malloc(len + 1);
+        const buf = proxy_malloc_or_throw(len + 1);
         Module.stringToUTF8(js_obj, buf, len + 1);
         Module.setValue(out + 4, len, "i32");
         Module.setValue(out + 8, buf, "i32");
@@ -240,6 +260,12 @@ function proxy_convert_mp_to_js_obj_jsside(value) {
         // Exception
         const str_len = Module.getValue(value + 4, "i32");
         const str_ptr = Module.getValue(value + 8, "i32");
+        if (str_ptr === 0) {
+            throw new PythonError(
+                'MemoryError',
+                'Could not allocate exception serialization buffer',
+            );
+        }
         const str = Module.UTF8ToString(str_ptr, str_len);
         Module._free(str_ptr);
         const str_split = str.split("\x04");

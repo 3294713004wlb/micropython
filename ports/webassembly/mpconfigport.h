@@ -29,7 +29,7 @@
 // defaults in py/mpconfig.h.
 
 #include <stdint.h>
-#include <stdlib.h> // for malloc, for MICROPY_GC_SPLIT_HEAP_AUTO
+#include <stdlib.h> // for malloc/free in the WebAssembly port
 
 // Variant-specific definitions.
 #include "mpconfigvariant.h"
@@ -96,15 +96,26 @@
 #define MICROPY_VARIANT_ENABLE_JS_HOOK (0)
 #endif
 
-// Original v1.23 project hook checked JS input every 10 VM polls and
-// cooperatively yielded to the browser every 255 polls.  The latest runtime
-// may also be entered synchronously (pyimport, PyProxy), so yield ONLY when
-// an Asyncify-capable execution entry point is active.
-#if MICROPY_VARIANT_ENABLE_JS_HOOK
+// The native CLI runs synchronously in a dedicated Worker. Hardware I/O and
+// cancellation are handled via shared memory by another Worker/main thread.
+// Automatically unwinding the entire VM stack every N bytecodes is unnecessary
+// for CLI execution and can make large imports both slow and fragile.
+// Keep a compile-time opt-in for applications that require VM cooperation.
+#ifndef MICROPY_WASM_VM_AUTO_YIELD
+#define MICROPY_WASM_VM_AUTO_YIELD (0)
+#endif
+
+#ifndef MICROPY_WASM_CLI_BUSY_DELAY
+#define MICROPY_WASM_CLI_BUSY_DELAY (1)
+#endif
+
 #ifndef MICROPY_WASM_VM_YIELD_INTERVAL
 #define MICROPY_WASM_VM_YIELD_INTERVAL (255)
 #endif
+
+#if MICROPY_VARIANT_ENABLE_JS_HOOK
 #define MICROPY_VM_HOOK_COUNT (10)
+#if MICROPY_WASM_VM_AUTO_YIELD
 #define MICROPY_VM_HOOK_INIT \
     static uint vm_hook_divisor = MICROPY_VM_HOOK_COUNT; \
     static uint vm_yield_divisor = MICROPY_WASM_VM_YIELD_INTERVAL;
@@ -119,9 +130,21 @@
         extern void mp_wasm_vm_yield(void); \
         mp_wasm_vm_yield(); \
     } \
-} while (0);
-#define MICROPY_VM_HOOK_LOOP MICROPY_VM_HOOK_POLL
-#define MICROPY_VM_HOOK_RETURN MICROPY_VM_HOOK_POLL
+} while (0)
+#else
+// Poll for VM events without suspending, unwinding, or resuming Asyncify.
+#define MICROPY_VM_HOOK_INIT \
+    static uint vm_hook_divisor = MICROPY_VM_HOOK_COUNT;
+#define MICROPY_VM_HOOK_POLL do { \
+    if (--vm_hook_divisor == 0) { \
+        vm_hook_divisor = MICROPY_VM_HOOK_COUNT; \
+        extern void mp_hal_process_events(void); \
+        mp_hal_process_events(); \
+    } \
+} while (0)
+#endif
+#define MICROPY_VM_HOOK_LOOP MICROPY_VM_HOOK_POLL;
+#define MICROPY_VM_HOOK_RETURN MICROPY_VM_HOOK_POLL;
 #endif
 
 // type definitions for the specific machine

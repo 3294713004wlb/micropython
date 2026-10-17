@@ -84,6 +84,13 @@ static mp_obj_t bool_binary_op(mp_binary_op_t op, mp_obj_t lhs_in, mp_obj_t rhs_
     return mp_binary_op(op, MP_OBJ_NEW_SMALL_INT(value), rhs_in);
 }
 
+// bool inherits integer semantics for byte serialization in Python 3.10.
+extern const mp_obj_fun_builtin_var_t int_to_bytes_obj;
+static const mp_rom_map_elem_t bool_locals_table[] = {
+    { MP_ROM_QSTR(MP_QSTR_to_bytes), MP_ROM_PTR(&int_to_bytes_obj) },
+};
+static MP_DEFINE_CONST_DICT(bool_locals_dict, bool_locals_table);
+
 MP_DEFINE_CONST_OBJ_TYPE(
     // can match all numeric types
     mp_type_bool,
@@ -92,7 +99,8 @@ MP_DEFINE_CONST_OBJ_TYPE(
     make_new, bool_make_new,
     print, bool_print,
     unary_op, bool_unary_op,
-    binary_op, bool_binary_op
+    binary_op, bool_binary_op,
+    locals_dict, &bool_locals_dict
     );
 
 #if !MICROPY_OBJ_IMMEDIATE_OBJS
