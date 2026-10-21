@@ -30,6 +30,7 @@
 
 #include "py/unicode.h"
 #include "py/objstr.h"
+#include "py/objtype.h"
 #include "py/objlist.h"
 #include "py/runtime.h"
 #include "py/cstack.h"
@@ -1325,6 +1326,53 @@ static vstr_t mp_obj_str_format_helper(const char *str, const char *top, int *ar
             arg = args[(*arg_i) + 1];
             (*arg_i)++;
         }
+        // CPython evaluates nested format fields before invoking __format__.
+        // Keep the expanded specifier around for either a Python-defined
+        // formatter or the native numeric/string formatting path below.
+        vstr_t format_spec_vstr;
+        if (format_spec) {
+            mp_cstack_check();
+            format_spec_vstr = mp_obj_str_format_helper(format_spec, str, arg_i, n_args, args, kwargs);
+        }
+
+        // User-defined objects must receive their format specification via
+        // __format__(spec), including the empty spec in "{}" / "{:}".
+        // Previously every non-native object was implicitly coerced with
+        // str(), which breaks libraries such as tqdm (FormatReplace / Bar).
+        // !s and !r are handled below, before ordinary string formatting.
+        if (!conversion && !arg_looks_numeric(arg) && !mp_obj_is_str(arg)) {
+            mp_obj_t method[3];
+            mp_load_special_method_maybe(arg, MP_QSTR___format__, method);
+            if (method[0] != MP_OBJ_NULL) {
+                method[2] = format_spec
+                    ? mp_obj_new_str(format_spec_vstr.buf, format_spec_vstr.len)
+                    : MP_OBJ_NEW_QSTR(MP_QSTR_);
+                if (format_spec) {
+                    vstr_clear(&format_spec_vstr);
+                }
+                mp_obj_t result = mp_call_method_n_kw(1, 0, method);
+                if (!mp_obj_is_str(result)) {
+                    mp_raise_msg_varg(&mp_type_TypeError,
+                        MP_ERROR_TEXT("__format__ must return a str, not %s"),
+                        mp_obj_get_type_str(result));
+                }
+                size_t result_len;
+                const char *result_str = mp_obj_str_get_data(result, &result_len);
+                vstr_add_strn(&vstr, result_str, result_len);
+                continue;
+            }
+
+            // CPython's object.__format__ falls back to str(obj) only for
+            // an empty format specification; non-empty ones are unsupported.
+            if (format_spec && format_spec_vstr.len != 0) {
+                vstr_clear(&format_spec_vstr);
+                mp_raise_msg_varg(&mp_type_TypeError,
+                    MP_ERROR_TEXT("unsupported format string passed to %s.__format__"),
+                    mp_obj_get_type_str(arg));
+            }
+            conversion = 's';
+        }
+
         if (!format_spec && !conversion) {
             conversion = 's';
         }
@@ -1361,9 +1409,7 @@ static vstr_t mp_obj_str_format_helper(const char *str, const char *top, int *ar
             // precision   ::=  integer
             // type        ::=  "b" | "c" | "d" | "e" | "E" | "f" | "F" | "g" | "G" | "n" | "o" | "s" | "x" | "X" | "%"
 
-            // recursively call the formatter to format any nested specifiers
-            mp_cstack_check();
-            vstr_t format_spec_vstr = mp_obj_str_format_helper(format_spec, str, arg_i, n_args, args, kwargs);
+            // Nested replacement fields have already been expanded above.
             const char *s = vstr_null_terminated_str(&format_spec_vstr);
             const char *stop = s + format_spec_vstr.len;
             if (isalignment(*s)) {

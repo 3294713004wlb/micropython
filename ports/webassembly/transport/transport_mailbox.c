@@ -36,6 +36,29 @@ static void status_store(int32_t *p, int32_t value) {
 }
 
 /*
+ * Never spin while the browser is executing WebHID/WebUSB promises.
+ *
+ * The mailbox is backed by shared WASM memory. The JS bridge calls
+ * Atomics.notify() whenever it publishes DONE/ERROR. Likewise the C side
+ * notifies the JS pump when it publishes PENDING/IDLE. memory.atomic.wait32
+ * only blocks the CLI Worker, never the browser thread.
+ *
+ * A bounded wait is important: cancellation can arrive over a different SAB
+ * without changing this status word. Recheck cancellation and the deadline
+ * every 4 ms at most; a normal transfer wakes immediately upon notification.
+ * A status transition occurring before wait32 is harmless: the wait returns
+ * "not-equal" instead of sleeping, so there is no lost-wakeup race.
+ */
+static void status_wait(int32_t *p, int32_t expected) {
+#if defined(__wasm__)
+    __builtin_wasm_memory_atomic_wait32((int *)p, expected, 4000000LL);
+#else
+    (void)p;
+    (void)expected;
+#endif
+}
+
+/*
  * Execute one packet transaction using the static WASM memory as a mailbox.
  * The browser may process WebUSB/HID asynchronously, but only one VM caller
  * publishes a command per protocol at a time.  This removes four ring cursor
@@ -68,14 +91,16 @@ static int transport_transfer_inner(int protocol, int opcode, const char *id,
         (timeout > 2147482647 ? 2147483647 : timeout + 1000) :
         (protocol == TP_KIND_HID && opcode == 2 && timeout < 0 ? -1 : 30000);
     double deadline = wait_ms < 0 ? 0 : emscripten_get_now() + wait_ms;
-    uint32_t spin = 0;
-
-    while (status_load(&state[TP_FIELD_STATUS]) != TP_STATUS_IDLE) {
+    for (;;) {
+        int32_t current = status_load(&state[TP_FIELD_STATUS]);
+        if (current == TP_STATUS_IDLE) {
+            break;
+        }
         transport_check_cancel();
-        if (deadline > 0 && (++spin & 0xff) == 0 &&
-            emscripten_get_now() >= deadline) {
+        if (deadline > 0 && emscripten_get_now() >= deadline) {
             return -1;
         }
+        status_wait(&state[TP_FIELD_STATUS], current);
     }
 
     /* All arguments and bytes are written before the release-store below.
@@ -105,7 +130,6 @@ static int transport_transfer_inner(int protocol, int opcode, const char *id,
     state[TP_FIELD_ERROR_LENGTH] = 0;
     status_store(&state[TP_FIELD_STATUS], TP_STATUS_PENDING);
 
-    spin = 0;
     for (;;) {
         int32_t status = status_load(&state[TP_FIELD_STATUS]);
         if (status != TP_STATUS_PENDING && status != TP_STATUS_COMMITTING) {
@@ -115,8 +139,7 @@ static int transport_transfer_inner(int protocol, int opcode, const char *id,
         /* Only recycle the mailbox if the device side has not claimed it.
          * Once COMMITTING, the JS copy runs without yielding and is short. */
         bool cancelled = wasm_transport_cancelled();
-        bool expired = deadline > 0 && (++spin & 0xff) == 0 &&
-            emscripten_get_now() >= deadline;
+        bool expired = deadline > 0 && emscripten_get_now() >= deadline;
         if ((cancelled || expired) && status == TP_STATUS_PENDING) {
             int32_t pending = TP_STATUS_PENDING;
             if (__atomic_compare_exchange_n(&state[TP_FIELD_STATUS], &pending,
@@ -126,7 +149,9 @@ static int transport_transfer_inner(int protocol, int opcode, const char *id,
                 }
                 return -1;
             }
+            /* The browser won ownership. Wait for COMMITTING to finish. */
         }
+        status_wait(&state[TP_FIELD_STATUS], status);
     }
 
     int status = status_load(&state[TP_FIELD_STATUS]);
@@ -171,6 +196,14 @@ int transport_usb_control(int opcode, int bm, int req, int value, int index,
         rx_length, timeout, bm, req, value, index);
 }
 
+
+void transport_set_error(const char *message) {
+    if (message == NULL) message = "USB pipe I/O error";
+    size_t length = strlen(message);
+    if (length >= sizeof(last_error)) length = sizeof(last_error) - 1;
+    memcpy(last_error, message, length);
+    last_error[length] = '\0';
+}
 
 const char *transport_last_error(void) {
     return last_error;

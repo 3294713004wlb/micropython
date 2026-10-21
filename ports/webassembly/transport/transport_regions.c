@@ -7,6 +7,7 @@ EMSCRIPTEN_KEEPALIVE uintptr_t wasm_transport_region(int id) {
     if (!address) address = transport_mailbox_region(id);
     if (!address) address = transport_runtime_region(id);
     if (!address) address = transport_terminal_region(id);
+    if (!address) address = transport_usb_pipe_region(id);
     return address;
 }
 
@@ -15,6 +16,7 @@ EMSCRIPTEN_KEEPALIVE int wasm_transport_region_size(int id) {
     if (!size) size = transport_mailbox_region_size(id);
     if (!size) size = transport_runtime_region_size(id);
     if (!size) size = transport_terminal_region_size(id);
+    if (!size) size = transport_usb_pipe_region_size(id);
     return (int)size;
 }
 

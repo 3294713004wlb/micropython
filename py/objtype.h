@@ -43,6 +43,10 @@ mp_obj_instance_t *mp_obj_new_instance(const mp_obj_type_t *cls, const mp_obj_ty
 #endif
 
 // these need to be exposed so mp_obj_is_callable can work correctly
+// Look up a special method on an object's type without triggering its
+// instance __getattr__ (CPython special-method semantics).
+void mp_load_special_method_maybe(mp_obj_t obj, qstr attr, mp_obj_t *dest);
+
 bool mp_obj_instance_is_callable(mp_obj_t self_in);
 mp_obj_t mp_obj_instance_call(mp_obj_t self_in, size_t n_args, size_t n_kw, const mp_obj_t *args);
 

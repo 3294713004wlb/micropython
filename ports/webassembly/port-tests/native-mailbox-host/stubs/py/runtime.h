@@ -52,3 +52,5 @@ mp_obj_t mp_obj_new_bytes(const byte*,size_t);
 mp_obj_t mp_obj_new_int(mp_int_t);
 mp_obj_t mp_obj_new_bool(bool);
 const char* mp_obj_str_get_str(mp_obj_t);
+/* Real MicroPython py/obj.h declares this API; keep the host stub in sync. */
+mp_obj_t mp_obj_new_int_from_ull(unsigned long long value);

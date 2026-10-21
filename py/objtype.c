@@ -592,6 +592,30 @@ static mp_obj_t instance_binary_op(mp_binary_op_t op, mp_obj_t lhs_in, mp_obj_t 
     return res;
 }
 
+// CPython performs special-method lookup on the type (and its bases), not
+// on the instance.  In particular, __getattr__ must not be invoked when
+// __format__ is absent.  This is also important for typing._SpecialForm,
+// whose __getattr__ raises AttributeError for unknown names.
+void mp_load_special_method_maybe(mp_obj_t obj, qstr attr, mp_obj_t *dest) {
+    if (!mp_obj_is_instance_type(mp_obj_get_type(obj))) {
+        // Native types retain their normal method lookup rules.
+        mp_load_method_maybe(obj, attr, dest);
+        return;
+    }
+
+    dest[0] = MP_OBJ_NULL;
+    dest[1] = MP_OBJ_NULL;
+    mp_obj_instance_t *self = MP_OBJ_TO_PTR(obj);
+    struct class_lookup_data lookup = {
+        .obj = self,
+        .attr = attr,
+        .slot_offset = 0,
+        .dest = dest,
+        .is_type = false,
+    };
+    mp_obj_class_lookup(&lookup, self->base.type);
+}
+
 static void mp_obj_instance_load_attr(mp_obj_t self_in, qstr attr, mp_obj_t *dest) {
     // logic: look in instance members then class locals
     assert(mp_obj_is_instance_type(mp_obj_get_type(self_in)));

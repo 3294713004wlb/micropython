@@ -195,6 +195,63 @@ static mp_obj_t mp_builtin_divmod(mp_obj_t o1_in, mp_obj_t o2_in) {
 }
 MP_DEFINE_CONST_FUN_OBJ_2(mp_builtin_divmod_obj, mp_builtin_divmod);
 
+// Python's built-in format(value, format_spec="").
+// Dispatch to user-defined __format__ for arbitrary Python objects, including
+// classes used by enum and tqdm.  For native numeric and string types reuse
+// the existing str.format implementation instead of duplicating the format
+// mini-language parser here.
+static mp_obj_t mp_builtin_format(size_t n_args, const mp_obj_t *args) {
+    mp_obj_t format_spec = n_args == 2 ? args[1] : MP_OBJ_NEW_QSTR(MP_QSTR_);
+    if (!mp_obj_is_str(format_spec)) {
+        mp_raise_msg(&mp_type_TypeError, MP_ERROR_TEXT("format() argument 2 must be str"));
+    }
+
+    // Python-defined formatters receive the *raw* format specification.
+    // In particular, do not parse '{' or '}' within a custom specification.
+    mp_obj_t method[3];
+    mp_load_special_method_maybe(args[0], MP_QSTR___format__, method);
+    if (method[0] != MP_OBJ_NULL) {
+        method[2] = format_spec;
+        mp_obj_t result = mp_call_method_n_kw(1, 0, method);
+        if (!mp_obj_is_str(result)) {
+            mp_raise_msg_varg(&mp_type_TypeError,
+                MP_ERROR_TEXT("__format__ must return a str, not %s"),
+                mp_obj_get_type_str(result));
+        }
+        return result;
+    }
+
+    size_t spec_len;
+    const char *spec = mp_obj_str_get_data(format_spec, &spec_len);
+
+    // If no custom __format__ is defined, allow native types to be formatted
+    // by the MicroPython implementation of the format mini-language.
+    // For other objects, only an empty spec is supported (object.__format__).
+    if (spec_len != 0
+        && !mp_obj_is_bool(args[0])
+        && !mp_obj_is_int(args[0])
+        #if MICROPY_PY_BUILTINS_FLOAT
+        && !mp_obj_is_float(args[0])
+        #endif
+        && !mp_obj_is_str(args[0])) {
+        mp_raise_msg_varg(&mp_type_TypeError,
+            MP_ERROR_TEXT("unsupported format string passed to %s.__format__"),
+            mp_obj_get_type_str(args[0]));
+    }
+
+    // Reuse the same formatting path as "{:spec}".format(value), preserving
+    // the native integer/float/string behavior and MicroPython port options.
+    vstr_t format_str;
+    vstr_init(&format_str, spec_len + 4);
+    vstr_add_strn(&format_str, "{:", 2);
+    vstr_add_strn(&format_str, spec, spec_len);
+    vstr_add_byte(&format_str, '}');
+    mp_obj_t format_obj = mp_obj_new_str_from_vstr(&format_str);
+    mp_obj_t format_args[] = {format_obj, args[0]};
+    return mp_obj_str_format(MP_ARRAY_SIZE(format_args), format_args, NULL);
+}
+MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mp_builtin_format_obj, 1, 2, mp_builtin_format);
+
 static mp_obj_t mp_builtin_hash(mp_obj_t o_in) {
     // result is guaranteed to be a (small) int
     return mp_unary_op(MP_UNARY_OP_HASH, o_in);
@@ -725,6 +782,7 @@ static const mp_rom_map_elem_t mp_module_builtins_globals_table[] = {
     #if MICROPY_PY_BUILTINS_EXECFILE
     { MP_ROM_QSTR(MP_QSTR_execfile), MP_ROM_PTR(&mp_builtin_execfile_obj) },
     #endif
+    { MP_ROM_QSTR(MP_QSTR_format), MP_ROM_PTR(&mp_builtin_format_obj) },
     { MP_ROM_QSTR(MP_QSTR_getattr), MP_ROM_PTR(&mp_builtin_getattr_obj) },
     { MP_ROM_QSTR(MP_QSTR_setattr), MP_ROM_PTR(&mp_builtin_setattr_obj) },
     { MP_ROM_QSTR(MP_QSTR_globals), MP_ROM_PTR(&mp_builtin_globals_obj) },

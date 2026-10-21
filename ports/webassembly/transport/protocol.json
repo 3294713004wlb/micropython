@@ -1,6 +1,6 @@
 {
   "name": "MicroPython Browser Native Shared Transport",
-  "version": 5,
+  "version": 8,
   "mailboxMagic": 1296193589,
   "endianness": "little",
   "regionAlignment": 4,
@@ -69,6 +69,16 @@
       "id": 12,
       "name": "terminal_output",
       "bytes": 1048592
+    },
+    {
+      "id": 13,
+      "name": "usb_pipe_tx",
+      "bytes": 131088
+    },
+    {
+      "id": 14,
+      "name": "usb_pipe_rx",
+      "bytes": 131088
     }
   ],
   "ring": {
@@ -125,21 +135,29 @@
       "in": 2,
       "outIn": 3,
       "controlOut": 4,
-      "controlIn": 5
+      "controlIn": 5,
+      "streamSubmit": 7,
+      "streamTake": 8,
+      "streamReset": 9,
+      "repeatRead": 10,
+      "repeatWrite": 11
     },
     "hid": {
       "write": 1,
       "read": 2,
       "output": 3,
       "featureWrite": 4,
-      "featureRead": 5
+      "featureRead": 5,
+      "streamSubmit": 7,
+      "streamTake": 8,
+      "streamReset": 9
     }
   },
   "channelSemantics": {
     "serial": "SPSC bytes; producer release-publishes write, consumer release-publishes read; one empty slot distinguishes full",
     "terminal": "SPSC int32 stream-tagged bytes; one empty slot; stream 1 stdout, stream 2 stderr",
-    "usb": "single-flight packet mailbox with atomic state transitions and generation fencing",
-    "hid": "single-flight report mailbox with atomic state transitions and generation fencing",
+    "usb": "single-slot mailbox for control and repeat; independent two-ring SPSC USB stream for pyOCD ordinary DAP submit/take",
+    "hid": "single-flight native mailbox; streaming opcodes submit to persistent JS TX/RX queues and take one completion",
     "cancel": "atomic 32-bit interrupt flag"
   },
   "memoryModel": {

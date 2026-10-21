@@ -215,6 +215,7 @@ SRC_C += \
 	transport/transport_terminal.c \
 	transport/transport_serial.c \
 	transport/transport_mailbox.c \
+	transport/transport_usb_pipe.c \
 	transport/transport_regions.c \
 	modwasm_transport.c \
 	fatfs_port.c \
