@@ -26,6 +26,7 @@
 
 #include <emscripten.h>
 #include <unistd.h>
+#include <stdio.h>
 #include "py/mphal.h"
 #include "py/runtime.h"
 #include "library.h"
@@ -38,6 +39,18 @@ static void stderr_print_strn(void *env, const char *str, size_t len) {
 }
 
 const mp_print_t mp_stderr_print = {NULL, stderr_print_strn};
+
+/* One real stdin implementation shared by input(), readline and stream I/O.
+ * Emscripten fd 0 delegates to Module.stdin in the isolated Worker.
+ * Non-interactive jobs receive EOF; the application decides what to do.
+ */
+int mp_hal_stdin_rx_chr(void) {
+    unsigned char ch;
+    if (read(STDIN_FILENO, &ch, 1) == 1) {
+        return ch;
+    }
+    return 4; // Ctrl-D: MicroPython readline's end-of-input marker.
+}
 
 mp_uint_t mp_hal_stdout_tx_strn(const char *str, size_t len) {
     return wasm_transport_terminal_write(1, str, len);

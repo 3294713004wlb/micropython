@@ -18,6 +18,7 @@ static int32_t hid_state[TP_MAILBOX_WORDS] __attribute__((aligned(16))) = {
 static uint8_t usb_error[TP_REGION_SIZE_USB_ERROR];
 static uint8_t hid_error[TP_REGION_SIZE_HID_ERROR];
 static uint8_t hid_id[TP_REGION_SIZE_HID_ID];
+static uint8_t usb_id[TP_REGION_SIZE_USB_ID];
 static char last_error[256];
 
 typedef char mailbox_descriptor_size_matches_protocol[
@@ -77,11 +78,11 @@ static int transport_transfer_inner(int protocol, int opcode, const char *id,
     uint8_t *out = protocol == TP_KIND_USB ? usb_tx : hid_tx;
     uint8_t *in = protocol == TP_KIND_USB ? usb_rx : hid_rx;
     int capacity = protocol == TP_KIND_USB ? TP_REGION_SIZE_USB_TX : TP_REGION_SIZE_HID_TX;
-    uint32_t id_len = protocol == TP_KIND_USB ? 0 : (uint32_t)strlen(id);
+    uint32_t id_len = (uint32_t)strlen(id ? id : "");
 
     if (tx_len < 0 || tx_len > capacity ||
         rx_length < 0 || rx_length > capacity ||
-        id_len >= TP_REGION_SIZE_HID_ID) {
+        id_len >= (protocol == TP_KIND_USB ? TP_REGION_SIZE_USB_ID : TP_REGION_SIZE_HID_ID)) {
         return -1;
     }
 
@@ -111,6 +112,8 @@ static int transport_transfer_inner(int protocol, int opcode, const char *id,
     int32_t seq = __atomic_add_fetch(&state[TP_FIELD_SEQUENCE], 1, __ATOMIC_ACQ_REL);
     state[TP_FIELD_OPCODE] = opcode;
     if (protocol == TP_KIND_USB) {
+        memcpy(usb_id, id, id_len);
+        usb_id[id_len] = '\0';
         state[TP_FIELD_PARAM_A] = param_a & 15;
         state[TP_FIELD_PARAM_B] = param_b & 15;
         state[TP_FIELD_BM_REQUEST_TYPE] = bm & 255;
@@ -190,10 +193,16 @@ int transport_transfer(int protocol, int opcode, const char *id,
         tx_len, rx, rx_length, timeout, 0, 0, 0, 0);
 }
 
+int transport_usb_control_for(const char *id, int opcode, int bm, int req,
+    int value, int index, const uint8_t *tx, int tx_len, uint8_t *rx,
+    int rx_length, int timeout) {
+    return transport_transfer_inner(TP_KIND_USB, opcode, id, 0, 0, tx, tx_len, rx,
+        rx_length, timeout, bm, req, value, index);
+}
 int transport_usb_control(int opcode, int bm, int req, int value, int index,
     const uint8_t *tx, int tx_len, uint8_t *rx, int rx_length, int timeout) {
-    return transport_transfer_inner(TP_KIND_USB, opcode, "", 0, 0, tx, tx_len, rx,
-        rx_length, timeout, bm, req, value, index);
+    return transport_usb_control_for("", opcode, bm, req, value, index,
+        tx, tx_len, rx, rx_length, timeout);
 }
 
 
@@ -219,6 +228,7 @@ uintptr_t transport_mailbox_region(int id) {
         case TP_REGION_USB_ERROR: return (uintptr_t)usb_error;
         case TP_REGION_HID_ERROR: return (uintptr_t)hid_error;
         case TP_REGION_HID_ID: return (uintptr_t)hid_id;
+        case TP_REGION_USB_ID: return (uintptr_t)usb_id;
         default: return 0;
     }
 }
@@ -233,6 +243,7 @@ size_t transport_mailbox_region_size(int id) {
         case TP_REGION_USB_ERROR: return sizeof(usb_error);
         case TP_REGION_HID_ERROR: return sizeof(hid_error);
         case TP_REGION_HID_ID: return sizeof(hid_id);
+        case TP_REGION_USB_ID: return sizeof(usb_id);
         default: return 0;
     }
 }

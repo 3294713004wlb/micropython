@@ -217,7 +217,11 @@ SRC_C += \
 	transport/transport_mailbox.c \
 	transport/transport_usb_pipe.c \
 	transport/transport_regions.c \
-	modwasm_transport.c \
+	device/device_host.c \
+	device/device_serial.c \
+	device/device_hid.c \
+	device/device_usb.c \
+	modwasm_device.c \
 	fatfs_port.c \
 	lexer_dedent.c \
 	main.c \

@@ -13,7 +13,7 @@
 #include "../../transport/transport_serial.c"
 #include "../../transport/transport_mailbox.c"
 #include "../../transport/transport_regions.c"
-#include "../../modwasm_transport.c"
+#include "../../modwasm_device.c"
 
 int mp_type_KeyboardInterrupt = 0;
 void mp_raise_type(void *exception) {

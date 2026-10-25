@@ -1,6 +1,6 @@
 {
   "name": "MicroPython Browser Native Shared Transport",
-  "version": 8,
+  "version": 11,
   "mailboxMagic": 1296193589,
   "endianness": "little",
   "regionAlignment": 4,
@@ -73,12 +73,17 @@
     {
       "id": 13,
       "name": "usb_pipe_tx",
-      "bytes": 131088
+      "bytes": 131600
     },
     {
       "id": 14,
       "name": "usb_pipe_rx",
-      "bytes": 131088
+      "bytes": 131600
+    },
+    {
+      "id": 15,
+      "name": "usb_id",
+      "bytes": 512
     }
   ],
   "ring": {
@@ -140,7 +145,10 @@
       "streamTake": 8,
       "streamReset": 9,
       "repeatRead": 10,
-      "repeatWrite": 11
+      "repeatWrite": 11,
+      "pipelineSubmit": 13,
+      "pipelineTake": 14,
+      "pipelineReset": 15
     },
     "hid": {
       "write": 1,
@@ -156,7 +164,7 @@
   "channelSemantics": {
     "serial": "SPSC bytes; producer release-publishes write, consumer release-publishes read; one empty slot distinguishes full",
     "terminal": "SPSC int32 stream-tagged bytes; one empty slot; stream 1 stdout, stream 2 stderr",
-    "usb": "single-slot mailbox for control and repeat; independent two-ring SPSC USB stream for pyOCD ordinary DAP submit/take",
+    "usb": "Generic ordered 32x4096 packet pipeline shared by WebUSB and HID CMSIS-DAP Flash transactions; transport selected by Flash BEGIN device handle; Python owns protocol and recovery",
     "hid": "single-flight native mailbox; streaming opcodes submit to persistent JS TX/RX queues and take one completion",
     "cancel": "atomic 32-bit interrupt flag"
   },
@@ -217,5 +225,13 @@
   "protocolKinds": {
     "usb": 1,
     "hid": 2
+  },
+  "usbPipe": {
+    "depth": 32,
+    "cellBytes": 4112,
+    "payloadBytes": 4096,
+    "cellHeaderBytes": 16,
+    "lengthBytes": 2,
+    "expectedResponseLengthBytes": 2
   }
 }

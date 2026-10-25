@@ -53,6 +53,8 @@ def generate(schema: dict) -> tuple[str, str]:
     ]:
         for name, value in values.items():
             header.append(f"#define TP_{section}_{constant(name)} {value}")
+    for name, value in schema.get('usbPipe', {}).items():
+        header.append(f"#define TP_USB_PIPE_{constant(name)} {value}")
     header.append(f'#define TP_MAILBOX_WORDS {schema["mailbox"]["words"]}')
     for name, value in schema["mailbox"]["fields"].items():
         header.append(f"#define TP_FIELD_{constant(name)} {value}")
@@ -83,6 +85,7 @@ def generate(schema: dict) -> tuple[str, str]:
         "REGION": {constant(r["name"]): r["id"] for r in regions},
         "REGION_BYTES": {constant(r["name"]): r["bytes"] for r in regions},
         "RING": {constant(k): v for k, v in schema["ring"].items()},
+        "USB_PIPE": {constant(k): v for k, v in schema.get("usbPipe", {}).items()},
         "TERMINAL": {constant(k): v for k, v in schema["terminal"].items()},
         "MAILBOX_FIELD": {constant(k): v for k, v in schema["mailbox"]["fields"].items()},
         "MAILBOX_STATUS": {constant(k): v for k, v in schema["mailbox"]["states"].items()},

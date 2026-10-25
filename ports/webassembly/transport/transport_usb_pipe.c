@@ -1,10 +1,10 @@
 /**
- * v8 USB CMSIS-DAP dual SPSC packet rings.
+ * Generic USB dual SPSC report rings.
  *
  * CLI Worker is the sole TX producer / RX consumer. Transport Worker is
- * the sole TX consumer / RX producer. Fixed 128-byte cells avoid wrap-frame
+ * the sole TX consumer / RX producer. Fixed 4112-byte cells avoid wrap-frame
  * copies, torn variable-length headers and allocations in the C fast path.
- * This is separate from the legacy USB mailbox used by device control and
+ * This is separate from the USB mailbox used by device control and
  * native DAP-repeat compatibility operations.
  */
 #include "transport.h"
@@ -12,10 +12,10 @@
 #include <emscripten.h>
 #include <emscripten/emscripten.h>
 
-#define PIPE_DEPTH 1024u
+#define PIPE_DEPTH TP_USB_PIPE_DEPTH
 #define PIPE_MASK (PIPE_DEPTH - 1u)
-#define PIPE_SLOT_BYTES 128u
-#define PIPE_PACKET_BYTES 64u
+#define PIPE_SLOT_BYTES TP_USB_PIPE_CELL_BYTES
+#define PIPE_PACKET_BYTES TP_USB_PIPE_PAYLOAD_BYTES
 
 typedef struct {
     uint32_t read;
@@ -73,8 +73,10 @@ int transport_usb_pipe_reset(void) {
 }
 
 int transport_usb_pipe_submit_typed(int ep_out, int ep_in,
-    const uint8_t *frame, size_t length, int timeout_ms, uint8_t type) {
+    const uint8_t *frame, size_t length, int timeout_ms, uint8_t type,
+    size_t expected_response_length, bool send_zlp) {
     if ((type > 3) || !frame || length < 1 || length > PIPE_PACKET_BYTES ||
+        expected_response_length < 1 || expected_response_length > PIPE_PACKET_BYTES ||
         ep_out < 1 || ep_out > 15 || ep_in < 1 || ep_in > 15) {
         transport_set_error("Invalid USB TX report or endpoint");
         return -1;
@@ -91,10 +93,14 @@ int transport_usb_pipe_submit_typed(int ep_out, int ep_in,
         if ((uint32_t)(write - read) < PIPE_DEPTH) {
             uint8_t *cell = tx_pipe.cells[write & PIPE_MASK];
             cell[0] = (uint8_t)length;
-            cell[1] = (uint8_t)ep_out;
-            cell[2] = (uint8_t)ep_in;
-            cell[3] = type;
-            memcpy(cell + 12, frame, length);
+            cell[1] = (uint8_t)(length >> 8);
+            cell[2] = (uint8_t)ep_out;
+            cell[3] = (uint8_t)ep_in;
+            cell[4] = type;
+            cell[5] = send_zlp ? 1 : 0;
+            cell[6] = (uint8_t)expected_response_length;
+            cell[7] = (uint8_t)(expected_response_length >> 8);
+            memcpy(cell + 16, frame, length);
             /* The Worker observes the cursor only after bytes are published. */
             publish32(&tx_pipe.write, write + 1u);
             return (int)length;
@@ -108,8 +114,10 @@ int transport_usb_pipe_submit_typed(int ep_out, int ep_in,
 }
 
 int transport_usb_pipe_submit(int ep_out, int ep_in,
-    const uint8_t *frame, size_t length, int timeout_ms) {
-    return transport_usb_pipe_submit_typed(ep_out, ep_in, frame, length, timeout_ms, 0);
+    const uint8_t *frame, size_t length, size_t response_length, int timeout_ms,
+    bool send_zlp) {
+    return transport_usb_pipe_submit_typed(ep_out, ep_in, frame, length, timeout_ms,
+        0, response_length, send_zlp);
 }
 
 int transport_usb_pipe_take(int ep_out, int ep_in,
@@ -130,17 +138,17 @@ int transport_usb_pipe_take(int ep_out, int ep_in,
         uint32_t write = load32(&rx_pipe.write);
         if (read != write) {
             uint8_t *cell = rx_pipe.cells[read & PIPE_MASK];
-            size_t length = cell[0];
+            size_t length = (size_t)cell[0] | ((size_t)cell[1] << 8);
             if (length < 1 || length > PIPE_PACKET_BYTES || length > capacity ||
-                cell[1] != (uint8_t)ep_out || cell[2] != (uint8_t)ep_in ||
-                cell[3] != 0) {
+                cell[2] != (uint8_t)ep_out || cell[3] != (uint8_t)ep_in ||
+                cell[4] != 0) {
                 transport_set_error("USB pipe response corrupt or endpoint mismatch");
                 return -1;
             }
-            memcpy(output, cell + 12, length);
+            memcpy(output, cell + 16, length);
             last_rx_arrival_ms = 0;
             for (unsigned i = 0; i < 8; ++i) {
-                last_rx_arrival_ms |= (uint64_t)cell[4 + i] << (i * 8);
+                last_rx_arrival_ms |= (uint64_t)cell[8 + i] << (i * 8);
             }
             publish32(&rx_pipe.read, read + 1u);
             return (int)length;

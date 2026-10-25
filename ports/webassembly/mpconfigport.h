@@ -81,6 +81,9 @@
 #define MICROPY_FATFS_RPATH       (2)
 #endif
 #define MICROPY_PY_SYS_PLATFORM     "webassembly"
+// Track the exception in the VM so CPython-compatible traceback modules may
+// use sys.exc_info(); MicroPython currently returns None for traceback.
+#define MICROPY_PY_SYS_EXC_INFO    (1)
 
 #ifndef MICROPY_PY_JS
 #define MICROPY_PY_JS (MICROPY_CONFIG_ROM_LEVEL_AT_LEAST_EXTRA_FEATURES)

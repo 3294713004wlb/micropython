@@ -23,7 +23,7 @@ extern mp_obj_t mp_const_none;
 #define MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(name,min,max,fun) int name
 #define MP_ROM_QSTR(x) 0
 #define MP_QSTR___name__ 0
-#define MP_QSTR_wasm_transport 0
+#define MP_QSTR_wasm_device 0
 #define MP_QSTR_serial_available 0
 #define MP_QSTR_serial_read 0
 #define MP_QSTR_serial_readinto 0
@@ -49,6 +49,7 @@ void mp_raise_msg_varg(void*,const char*,...);
 void mp_raise_type(void*);
 void mp_get_buffer_raise(mp_obj_t,mp_buffer_info_t*,int);
 mp_obj_t mp_obj_new_bytes(const byte*,size_t);
+mp_obj_t mp_obj_new_str(const char*,size_t);
 mp_obj_t mp_obj_new_int(mp_int_t);
 mp_obj_t mp_obj_new_bool(bool);
 const char* mp_obj_str_get_str(mp_obj_t);

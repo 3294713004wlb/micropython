@@ -127,9 +127,9 @@ self.onmessage = async ({ data }) => {
 ```
 
 `replProcessChar()` 为同步兼容接口；可能触发 Asyncify 的 Python 代码请使用异步 API。
-`input()` 虽会重新参与链接，但上游 `mphalport.h` 的 `mp_hal_stdin_rx_chr()`
-目前仍为 `(0)` 占位实现；REPL 中运行 `input()` 还需要独立的浏览器 stdin
-桥接或 Worker 输入队列，`replProcessChar()` 并不等同于程序运行期间的 stdin。
+CLI Worker 使用 Emscripten 的 `Module.stdin` 连接共享终端输入。
+`input()` 和 `sys.stdin` 均通过相同的 stdin 端口读取数据；
+`replProcessChar()` 则是独立的 REPL API，不用于常规 CLI 输入。
 
 ## J-Link / libjaylink / pylink 分阶段集成（新增）
 
@@ -285,3 +285,11 @@ The Uploader's installed Python standard library additionally supplies
 `xml.etree.ElementTree` for CMSIS-Packs. Syntax features such as
 `metaclass=`, annotation-derived class fields, CPython's `EnumMeta`, and
 built-in `int(base=...)` remain outside this compatibility layer.
+
+## CLI stdin compatibility
+
+The CLI build now uses `mp_hal_stdin_rx_chr()` backed by Emscripten fd 0,
+so MicroPython's built-in `input()` and `sys.stdin` share the same `Module.stdin`
+source configured by the calling Worker. The former `#define
+mp_hal_stdin_rx_chr() (0)` placeholder was removed; consumers must
+rebuild WASM for this change.
