@@ -245,6 +245,103 @@ static mp_obj_t str_from_invalid(mp_encoding_t encoding, const mp_obj_type_t *ty
 }
 #endif // MICROPY_PY_BUILTINS_STR_UNICODE_CHECK && MICROPY_PY_BUILTINS_BYTES_DECODE_ERRORS
 
+#if MICROPY_PY_BUILTINS_STR_LATIN1 && MICROPY_PY_BUILTINS_STR_UNICODE_CHECK
+// Recognise the common CPython spellings without changing other codecs.
+// Normalising here also accepts mixed-case spellings and underscores.
+static bool is_latin1_encoding(qstr encoding) {
+    const char *name = qstr_str(encoding);
+    char normalized[16];
+    size_t length = 0;
+
+    for (; *name != '\0'; ++name) {
+        char ch = *name;
+        if (ch == '-' || ch == '_' || ch == ' ') {
+            continue;
+        }
+        if (length >= sizeof(normalized) - 1) {
+            return false;
+        }
+        if (ch >= 'A' && ch <= 'Z') {
+            ch += 'a' - 'A';
+        }
+        normalized[length++] = ch;
+    }
+    normalized[length] = '\0';
+
+    return strcmp(normalized, "latin1") == 0
+        || strcmp(normalized, "iso88591") == 0
+        || strcmp(normalized, "cp819") == 0
+        || strcmp(normalized, "l1") == 0;
+}
+
+// A Latin-1 byte maps to the Unicode code point with the same value.
+// The resulting Python str still uses MicroPython's internal UTF-8 format.
+static mp_obj_t str_from_latin1(
+    const mp_obj_type_t *type,
+    const byte *data,
+    size_t length
+) {
+    vstr_t result;
+    vstr_init(&result, length);
+
+    for (size_t i = 0; i < length; ++i) {
+        if (data[i] < 0x80) {
+            vstr_add_byte(&result, data[i]);
+        } else {
+            vstr_add_char(&result, data[i]);
+        }
+    }
+
+    return mp_obj_new_str_type_from_vstr(type, &result);
+}
+
+// Encode one Unicode code point into one byte.  Non-Latin-1 characters
+// follow the normal strict/ignore/replace error policy.
+static mp_obj_t bytes_from_latin1(
+    const byte *data,
+    size_t length,
+    qstr errors
+) {
+    #if !MICROPY_PY_BUILTINS_BYTES_DECODE_ERRORS
+    (void)errors;
+    #endif
+
+    vstr_t result;
+    vstr_init(&result, length);
+    const byte *cursor = data;
+    const byte *end = data + length;
+
+    while (cursor < end) {
+        unichar ch = utf8_get_char(cursor);
+        cursor = utf8_next_char(cursor);
+
+        if (ch <= 0xff) {
+            vstr_add_byte(&result, ch);
+        } else {
+            #if MICROPY_PY_BUILTINS_BYTES_DECODE_ERRORS
+            if (errors == MP_QSTR_ignore) {
+                continue;
+            }
+            if (errors == MP_QSTR_replace) {
+                vstr_add_byte(&result, '?');
+                continue;
+            }
+            #endif
+            mp_raise_msg(
+                &mp_type_UnicodeEncodeError,
+                MP_ERROR_TEXT("'latin-1' codec can't encode character")
+            );
+        }
+    }
+
+    return mp_obj_new_bytes_from_vstr(&result);
+}
+#endif
+
+#if MICROPY_PY_BUILTINS_STR_EXTRA_CODECS && MICROPY_PY_BUILTINS_STR_UNICODE_CHECK
+#include "ports/webassembly/str_extra_codecs.h"
+#endif
+
 #if MICROPY_PY_BUILTINS_STR_UNICODE_CHECK
 static mp_encoding_t parse_encoding_arg(qstr encoding) {
     if (encoding == MP_QSTR_utf_hyphen_8 || encoding == MP_QSTR_utf8) {
@@ -298,6 +395,23 @@ mp_obj_t mp_obj_str_make_new(const mp_obj_type_t *type, size_t n_args, size_t n_
                 str_data = bufinfo.buf;
                 str_len = bufinfo.len;
             }
+
+            #if MICROPY_PY_BUILTINS_STR_LATIN1 && MICROPY_PY_BUILTINS_STR_UNICODE_CHECK
+            if (is_latin1_encoding(mp_obj_str_get_qstr(args[1]))) {
+                return str_from_latin1(type, str_data, str_len);
+            }
+            #endif
+
+            #if MICROPY_PY_BUILTINS_STR_EXTRA_CODECS && MICROPY_PY_BUILTINS_STR_UNICODE_CHECK
+            wasm_text_codec_t codec = wasm_find_text_codec(mp_obj_str_get_qstr(args[1]));
+            if (codec != WASM_CODEC_UNKNOWN) {
+                qstr errors = MP_QSTR_;
+                if (n_args >= 3 && args[2] != mp_const_none) {
+                    errors = mp_obj_str_get_qstr(args[2]);
+                }
+                return wasm_decode_text_codec(codec, type, str_data, str_len, errors);
+            }
+            #endif
 
             #if MICROPY_PY_BUILTINS_STR_UNICODE_CHECK
             mp_encoding_t encoding = parse_encoding_arg(mp_obj_str_get_qstr(args[1]));
@@ -373,6 +487,27 @@ static mp_obj_t bytes_make_new(const mp_obj_type_t *type_in, size_t n_args, size
         if (str_hash == 0) {
             str_hash = qstr_compute_hash(str_data, str_len);
         }
+
+        #if MICROPY_PY_BUILTINS_STR_LATIN1 && MICROPY_PY_BUILTINS_STR_UNICODE_CHECK
+        if (is_latin1_encoding(mp_obj_str_get_qstr(args[1]))) {
+            qstr errors = MP_QSTR_;
+            if (n_args >= 3 && args[2] != mp_const_none) {
+                errors = mp_obj_str_get_qstr(args[2]);
+            }
+            return bytes_from_latin1(str_data, str_len, errors);
+        }
+        #endif
+
+        #if MICROPY_PY_BUILTINS_STR_EXTRA_CODECS && MICROPY_PY_BUILTINS_STR_UNICODE_CHECK
+        wasm_text_codec_t codec = wasm_find_text_codec(mp_obj_str_get_qstr(args[1]));
+        if (codec != WASM_CODEC_UNKNOWN) {
+            qstr errors = MP_QSTR_;
+            if (n_args >= 3 && args[2] != mp_const_none) {
+                errors = mp_obj_str_get_qstr(args[2]);
+            }
+            return wasm_encode_text_codec(codec, str_data, str_len, errors);
+        }
+        #endif
 
         #if MICROPY_PY_BUILTINS_STR_UNICODE_CHECK
         mp_encoding_t encoding = parse_encoding_arg(mp_obj_str_get_qstr(args[1]));

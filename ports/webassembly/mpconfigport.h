@@ -80,6 +80,12 @@
 // Support paths relative to the FAT volume working directory.
 #define MICROPY_FATFS_RPATH       (2)
 #endif
+// Enable Latin-1 for CPython CLI tools that exchange arbitrary 8-bit data.
+// Keep the change confined to the browser port and native str/bytes codecs.
+#define MICROPY_PY_BUILTINS_STR_LATIN1 (1)
+// Optional native Unicode and common single-byte codecs for Python CLI tools.
+#define MICROPY_PY_BUILTINS_STR_EXTRA_CODECS (1)
+
 #define MICROPY_PY_SYS_PLATFORM     "webassembly"
 // Track the exception in the VM so CPython-compatible traceback modules may
 // use sys.exc_info(); MicroPython currently returns None for traceback.
